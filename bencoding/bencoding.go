@@ -113,7 +113,47 @@ func ParseDictionary(s string) (map[string]string, int, error) {
 	//
 	// Parse a string, then get the type and size of the next element, and increment the pointer.
 	// Rinse and repeat to build a map of string->string
-	return nil, 0, nil
+	result := map[string]string{}
+
+	if s[0] != 'd' {
+		return nil, 0, errors.New("dictionary does not begin with d")
+	}
+
+	var end int
+	for end = 1; s[end] != 'e' && end < len(s); {
+		// Parse key
+		key, size, err := ParseString(s[end:])
+		if err != nil {
+			return nil, 0, fmt.Errorf("invalid key: %w", err)
+		}
+
+		end += size
+
+		// Parse value
+		switch typeNext(s[end:]) {
+		case TypeString:
+			_, size, err = ParseString(s[end:])
+		case TypeList:
+			_, size, err = ParseList(s[end:])
+		case TypeInteger:
+			_, size, err = ParseInteger(s[end:])
+		case TypeDictionary:
+			_, size, err = ParseDictionary(s[end:])
+		}
+
+		if err != nil {
+			return nil, 0, fmt.Errorf("malformed dictionary value: %w", err)
+		}
+
+		result[key] = s[end : end+size]
+		end += size
+	}
+
+	if s[end] != 'e' {
+		return nil, 0, errors.New("dictionary does not end with e")
+	}
+
+	return result, end + 1, nil
 }
 
 func typeNext(s string) Type {

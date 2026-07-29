@@ -8,9 +8,10 @@ import (
 
 func TestParseString(t *testing.T) {
 	t.Run("parses well formed string", func(t *testing.T) {
-		s, _, err := ParseString("4:hellgiberish")
+		s, size, err := ParseString("4:hellgiberish")
 		require.NoError(t, err)
 		require.Equal(t, "hell", s)
+		require.Equal(t, 6, size)
 	})
 
 	t.Run("returns error when size is invalid", func(t *testing.T) {
@@ -63,7 +64,10 @@ func TestParseInteger(t *testing.T) {
 }
 
 func TestParseList(t *testing.T) {
-
+	t.Run("parse an empty list", func(t *testing.T) {})
+	t.Run("parse a list with every type", func(t *testing.T) {})
+	t.Run("return an error when list does not begin with l", func(t *testing.T) {})
+	t.Run("return an error when list does not end with e", func(t *testing.T) {})
 }
 func TestParseDictionary(t *testing.T) {
 
