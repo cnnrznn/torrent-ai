@@ -1,0 +1,130 @@
+package bencoding
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+type Type int
+
+const (
+	TypeString = iota
+	TypeInteger
+	TypeList
+	TypeDictionary
+)
+
+// Parse finds the size of a bencoded string. It
+// returns an error if the string is malformed.
+func ParseString(s string) (string, int, error) {
+	i := strings.Index(s, ":")
+	if i <= 0 {
+		return "", 0, errors.New("invalid string")
+	}
+
+	size, err := strconv.Atoi(s[:i])
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid string size: %w", err)
+	}
+
+	start := i + 1
+	end := start + size
+
+	if end > len(s) {
+		return "", 0, errors.New("string is shorter than length")
+	}
+
+	return s[start:end], end, nil
+}
+
+// LenInteger finds the size of a bencoded integer.
+func ParseInteger(s string) (int, int, error) {
+	if s[0] != 'i' {
+		return 0, 0, errors.New("integer does not begin with i")
+	}
+
+	i := strings.Index(s, "e")
+	if i < 0 {
+		return 0, 0, errors.New("integer does not end with e")
+	}
+
+	end := i + 1
+
+	n, err := strconv.Atoi(s[1:i])
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid integer: %w", err)
+	}
+
+	return n, end, nil
+}
+
+func ParseList(s string) ([]string, int, error) {
+	if s[0] != 'l' {
+		return nil, 0, errors.New("invalid list")
+	}
+
+	result := []string{}
+
+	// loop over the buffer, getting the length of each next element.
+	// add the length of the element to end every iteration
+	var end int
+	for end = 1; s[end] != 'e' && end < len(s); {
+		switch typeNext(s) {
+		case TypeString:
+			_, size, err := ParseString(s[end:])
+			if err != nil {
+				return nil, 0, fmt.Errorf("invalid string: %w", err)
+			}
+			end += size
+		case TypeInteger:
+			_, size, err := ParseInteger(s[end:])
+			if err != nil {
+				return nil, 0, fmt.Errorf("invalid ingeter: %w", err)
+			}
+			end += size
+		case TypeList:
+			_, size, err := ParseList(s[end:])
+			if err != nil {
+				return nil, 0, fmt.Errorf("invalid list: %w", err)
+			}
+			end += size
+		case TypeDictionary:
+			_, size, err := ParseDictionary(s[end:])
+			if err != nil {
+				return nil, 0, fmt.Errorf("invalid dictionary: %w", err)
+			}
+			end += size
+		}
+	}
+
+	if s[end] != 'e' {
+		return nil, 0, errors.New("list does not end in e")
+	}
+
+	return result, end + 1, nil
+}
+
+func ParseDictionary(s string) (map[string]string, int, error) {
+	// A dictionary is a string of the format <d><content><e>
+	// where <content> is a variable size list of <string><value> bencoded
+	// elements.
+	//
+	// Parse a string, then get the type and size of the next element, and increment the pointer.
+	// Rinse and repeat to build a map of string->string
+	return nil, 0, nil
+}
+
+func typeNext(s string) Type {
+	switch s[0] {
+	case 'l':
+		return TypeList
+	case 'd':
+		return TypeDictionary
+	case 'i':
+		return TypeInteger
+	default:
+		return TypeString
+	}
+}
