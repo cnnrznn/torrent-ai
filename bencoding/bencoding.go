@@ -62,43 +62,39 @@ func ParseInteger(s string) (int, int, error) {
 
 func ParseList(s string) ([]string, int, error) {
 	if s[0] != 'l' {
+		fmt.Println(s)
 		return nil, 0, errors.New("invalid list")
 	}
 
 	result := []string{}
 
+	var err error
+	var size int
+
 	// loop over the buffer, getting the length of each next element.
 	// add the length of the element to end every iteration
 	var end int
-	for end = 1; s[end] != 'e' && end < len(s); {
-		switch typeNext(s) {
+	for end = 1; end < len(s) && s[end] != 'e'; {
+		switch typeNext(s[end:]) {
 		case TypeString:
-			_, size, err := ParseString(s[end:])
-			if err != nil {
-				return nil, 0, fmt.Errorf("invalid string: %w", err)
-			}
-			end += size
+			_, size, err = ParseString(s[end:])
 		case TypeInteger:
-			_, size, err := ParseInteger(s[end:])
-			if err != nil {
-				return nil, 0, fmt.Errorf("invalid ingeter: %w", err)
-			}
-			end += size
+			_, size, err = ParseInteger(s[end:])
 		case TypeList:
-			_, size, err := ParseList(s[end:])
-			if err != nil {
-				return nil, 0, fmt.Errorf("invalid list: %w", err)
-			}
-			end += size
+			_, size, err = ParseList(s[end:])
 		case TypeDictionary:
-			_, size, err := ParseDictionary(s[end:])
-			if err != nil {
-				return nil, 0, fmt.Errorf("invalid dictionary: %w", err)
-			}
-			end += size
+			_, size, err = ParseDictionary(s[end:])
 		}
+		if err != nil {
+			return nil, 0, fmt.Errorf("error parsing list item: %w", err)
+		}
+		result = append(result, s[end:end+size])
+		end += size
 	}
 
+	if end >= len(s) {
+		return nil, 0, errors.New("EOF parsing list")
+	}
 	if s[end] != 'e' {
 		return nil, 0, errors.New("list does not end in e")
 	}
@@ -120,7 +116,7 @@ func ParseDictionary(s string) (map[string]string, int, error) {
 	}
 
 	var end int
-	for end = 1; s[end] != 'e' && end < len(s); {
+	for end = 1; end < len(s) && s[end] != 'e'; {
 		// Parse key
 		key, size, err := ParseString(s[end:])
 		if err != nil {

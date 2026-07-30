@@ -64,11 +64,57 @@ func TestParseInteger(t *testing.T) {
 }
 
 func TestParseList(t *testing.T) {
-	t.Run("parse an empty list", func(t *testing.T) {})
-	t.Run("parse a list with every type", func(t *testing.T) {})
-	t.Run("return an error when list does not begin with l", func(t *testing.T) {})
-	t.Run("return an error when list does not end with e", func(t *testing.T) {})
+	t.Run("parse an empty list", func(t *testing.T) {
+		ls, size, err := ParseList("le")
+		require.NoError(t, err)
+		require.Equal(t, 2, size)
+		require.Empty(t, ls)
+	})
+	t.Run("parse list with two strings", func(t *testing.T) {
+		ls, size, err := ParseList("l5:hello5:worlde")
+		require.NoError(t, err)
+		require.Equal(t, 16, size)
+		require.Equal(t, []string{"5:hello", "5:world"}, ls)
+	})
+	t.Run("parse list with list", func(t *testing.T) {
+		ls, size, err := ParseList("ll4:hellee")
+		require.NoError(t, err)
+		require.Equal(t, 10, size)
+		require.Equal(t, []string{"l4:helle"}, ls)
+	})
+	t.Run("parse list with a dictionary", func(t *testing.T) {
+		ls, size, err := ParseList("ldee")
+		require.NoError(t, err)
+		require.Equal(t, 4, size)
+		require.Equal(t, []string{"de"}, ls)
+	})
+	t.Run("parse a list with every type", func(t *testing.T) {
+		ls, size, err := ParseList("l4:helli69420el6:nesteded3:key5:valueee")
+		require.NoError(t, err)
+		require.Equal(t, 39, size)
+		require.Equal(t, []string{"4:hell", "i69420e", "l6:nestede", "d3:key5:valuee"}, ls)
+	})
+	t.Run("return an error when list does not begin with l", func(t *testing.T) {
+		ls, size, err := ParseList("5:helloe")
+		require.ErrorContains(t, err, "invalid list")
+		require.Equal(t, 0, size)
+		require.Empty(t, ls)
+	})
+	t.Run("return an error when list does not end with e", func(t *testing.T) {
+		ls, size, err := ParseList("l5:hello")
+		require.ErrorContains(t, err, "EOF parsing list")
+		require.Equal(t, 0, size)
+		require.Empty(t, ls)
+	})
 }
 func TestParseDictionary(t *testing.T) {
-
+	t.Run("successfully parse dictionary", func(t *testing.T) {
+		d, size, err := ParseDictionary("d3:key5:value4:key26:value2e")
+		require.NoError(t, err)
+		require.Equal(t, 28, size)
+		require.Equal(t, map[string]string{
+			"key": "5:value",
+			"key2": "6:value2",
+		}, d)
+	})
 }
