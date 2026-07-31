@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cnnrznn/torrent-scratch/bencoding"
+	"github.com/cnnrznn/torrent-scratch/pkg/bencoding"
 )
 
 // Metainfo represents the contents of a .torrent file
@@ -12,6 +12,9 @@ import (
 type Metainfo struct {
 	announce string
 	info     Info
+
+	// rawInfo is the bencoded value of the info dictionary
+	rawInfo string
 }
 
 func (m *Metainfo) String() string {
@@ -97,6 +100,7 @@ func New(s string) *Metainfo {
 			length:      length,
 			files:       files,
 		},
+		rawInfo: root["info"],
 	}
 }
 
