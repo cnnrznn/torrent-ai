@@ -1,8 +1,6 @@
 package metainfo
 
 import (
-	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -14,6 +12,35 @@ import (
 type Metainfo struct {
 	announce string
 	info     Info
+}
+
+func (m *Metainfo) String() string {
+	var b strings.Builder
+
+	b.WriteString("Announce: ")
+	b.WriteString(m.announce)
+	b.WriteByte('\n')
+	b.WriteString("Name: ")
+	b.WriteString(m.info.name)
+	b.WriteByte('\n')
+	b.WriteString("Piece Length: ")
+	b.WriteString(strconv.Itoa(m.info.pieceLength))
+	b.WriteByte('\n')
+	b.WriteString("Length: ")
+	b.WriteString(strconv.Itoa(m.info.length))
+	b.WriteByte('\n')
+
+	for _, file := range m.info.files {
+		b.WriteString("File: \n")
+		b.WriteString("\tPath: ")
+		b.WriteString(strings.Join(file.path, "/"))
+		b.WriteByte('\n')
+		b.WriteString("\tLength: ")
+		b.WriteString(strconv.Itoa(file.length))
+		b.WriteByte('\n')
+	}
+
+	return b.String()
 }
 
 type Info struct {
@@ -29,34 +56,46 @@ type File struct {
 	path   []string
 }
 
-func Parse(s string) Metainfo {
-	root := bencoding.ParseDictionary(s)
-	rawInfoDict := bencoding.ParseDictionary(root["info"])
-	files := []File{}
+func New(s string) *Metainfo {
+	root, _, _ := bencoding.ParseDictionary(s)
+	rawInfoDict, _, _ := bencoding.ParseDictionary(root["info"])
+	var files []File
+	var length int
 
 	if lengthStr, ok := rawInfoDict["length"]; ok {
-		files = append(files, File{
-			length: bencoding.ParseInteger(lengthStr),
-		})
+		length, _, _ = bencoding.ParseInteger(lengthStr)
 	}
 
 	if fileListStr, ok := rawInfoDict["files"]; ok {
-		fileList := bencoding.ParseList(fileListStr)
+		fileList, _, _ := bencoding.ParseList(fileListStr)
 		for _, fileStr := range fileList {
-			rawFileDict := bencoding.ParseDictionary(fileStr)
+			var (
+				rawFileDict, _, _ = bencoding.ParseDictionary(fileStr)
+				fileSize, _, _    = bencoding.ParseInteger(rawFileDict["length"])
+				pathList, _, _    = bencoding.ParseList(rawFileDict["path"])
+			)
 			files = append(files, File{
-				length: bencoding.ParseInteger(rawFileDict["length"]),
-				path:   bencoding.ParseList(rawFileDict["path"]),
+				length: fileSize,
+				path:   parseStringList(pathList),
 			})
 		}
 	}
 
-	return Metainfo{
-		announce: bencoding.ParseString(root["announce"]),
+	var (
+		annonceURL, _, _  = bencoding.ParseString(root["announce"])
+		name, _, _        = bencoding.ParseString(rawInfoDict["name"])
+		pieceLength, _, _ = bencoding.ParseInteger(rawInfoDict["piece length"])
+		piecesStr, _, _   = bencoding.ParseString(rawInfoDict["pieces"])
+	)
+
+	return &Metainfo{
+		announce: annonceURL,
 		info: Info{
-			name:        bencoding.ParseString(rawInfoDict["name"]),
-			pieceLength: bencoding.ParseInteger(rawInfoDict["piece length"]),
-			pieces:      splitPieceHashes(bencoding.ParseString(rawInfoDict["pieces"])),
+			name:        name,
+			pieceLength: pieceLength,
+			pieces:      splitPieceHashes(piecesStr),
+			length:      length,
+			files:       files,
 		},
 	}
 }
@@ -69,4 +108,18 @@ func splitPieceHashes(s string) []string {
 	}
 
 	return hashes
+}
+
+// parseStringList parses a list of strings where each
+// element is a bencoded string. It returns a list of
+// decoded strings.
+func parseStringList(rawList []string) []string {
+	var result []string
+
+	for _, raw := range rawList {
+		s, _, _ := bencoding.ParseString(raw)
+		result = append(result, s)
+	}
+
+	return result
 }
