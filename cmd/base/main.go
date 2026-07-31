@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cnnrznn/torrent-scratch/metainfo"
+	"github.com/cnnrznn/torrent-scratch/pkg/metainfo"
 )
 
 func main() {
