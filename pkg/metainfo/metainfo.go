@@ -1,6 +1,7 @@
 package metainfo
 
 import (
+	"crypto/sha1"
 	"strconv"
 	"strings"
 
@@ -15,6 +16,16 @@ type Metainfo struct {
 
 	// rawInfo is the bencoded value of the info dictionary
 	rawInfo string
+}
+
+func (m *Metainfo) Announce() string {
+	return m.announce
+}
+
+func (m *Metainfo) InfoHash() string {
+	h := sha1.New()
+	h.Write([]byte(m.rawInfo))
+	return string(h.Sum(nil))
 }
 
 func (m *Metainfo) String() string {
