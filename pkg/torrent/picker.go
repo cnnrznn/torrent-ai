@@ -36,9 +36,9 @@ type picker struct {
 	// instead of stalling it.
 	budget   *MemoryBudget
 	buffered int64 // this picker's share
-	have        peerwire.Bitfield
-	avail       []int
-	partial     map[int]*partialPiece
+	have     peerwire.Bitfield
+	avail    []int
+	partial  map[int]*partialPiece
 }
 
 func newPicker(m *metainfo.Metainfo, have peerwire.Bitfield, blockSize int) *picker {
