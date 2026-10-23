@@ -232,7 +232,9 @@ Flags on the command line take precedence.
 Sizes accept B, KiB, MiB and GiB (K, M, G and KB, MB, GB mean the same,
 powers of 1024). Durations use Go syntax: 500ms, 30s, 5m, 1h.
 
-Exit codes: 0 complete, 1 error, 2 usage, 3 timeout, 130 interrupted.
+Exit codes: 0 complete, 1 error, 2 usage, 3 timeout, 130 interrupted
+(SIGINT), 143 terminated (SIGTERM). Either signal shuts down cleanly,
+writing profiles and flushing telemetry; a second one exits at once.
 `)
 }
 

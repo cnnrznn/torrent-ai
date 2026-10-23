@@ -158,8 +158,9 @@ the flag name in upper case, with `-` as `_`: `TORRENT_AI_MAX_PEERS=20`.
 Switches turn on just by being set, so `TORRENT_AI_FLAME=` enables
 profiling. Flags on the command line take precedence.
 
-Ctrl-C shuts down cleanly, and the next run resumes from the verified
-pieces on disk.
+Ctrl-C and SIGTERM (a container or service stop) both shut down
+cleanly, writing profiles and flushing telemetry, and the next run
+resumes from the verified pieces on disk.
 
 ## Observability
 

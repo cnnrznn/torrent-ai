@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -64,7 +63,7 @@ func main() {
 	cfg.finish()
 	target := r.fs.Arg(0)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := withStopSignals(context.Background())
 	defer stop()
 
 	tel, err := setupTelemetry(ctx, cfg.otel)
@@ -83,6 +82,12 @@ func main() {
 		os.Exit(exitUsage)
 	}
 	mainLog := log.With("component", compMain)
+	context.AfterFunc(ctx, func() {
+		var sig *signalError
+		if errors.As(context.Cause(ctx), &sig) {
+			mainLog.Info("shutting down", "signal", sig.signalName(), "hint", "send it again to exit immediately")
+		}
+	})
 	if cfg.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeoutCause(ctx, cfg.timeout, errTimeout)
@@ -128,26 +133,34 @@ func main() {
 	span.End()
 	stopProfiling()
 
-	// Flush telemetry before exiting, even after an interrupt.
+	// Log the exit before flushing telemetry, so the exit line is
+	// exported too.
+	code := logExit(mainLog, ctx, err, elapsed)
+
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	if err := tel.shutdown(shutdownCtx); err != nil {
 		mainLog.Warn("opentelemetry shutdown failed", "err", err)
 	}
 	cancelShutdown()
+	os.Exit(code)
+}
 
+// logExit writes the final exit line and returns the exit code.
+func logExit(log *slog.Logger, ctx context.Context, err error, elapsed time.Duration) int {
+	var sig *signalError
 	switch {
 	case err == nil:
-		mainLog.Info("exit", "result", "complete", "elapsed", elapsed, "code", exitComplete)
-		os.Exit(exitComplete)
+		log.Info("exit", "result", "complete", "elapsed", elapsed, "code", exitComplete)
+		return exitComplete
 	case errors.Is(context.Cause(ctx), errTimeout):
-		mainLog.Error("exit", "result", "timeout", "elapsed", elapsed, "code", exitTimeout)
-		os.Exit(exitTimeout)
-	case ctx.Err() != nil:
-		mainLog.Info("exit", "result", "interrupted", "elapsed", elapsed, "code", exitInterrupted)
-		os.Exit(exitInterrupted)
+		log.Error("exit", "result", "timeout", "elapsed", elapsed, "code", exitTimeout)
+		return exitTimeout
+	case errors.As(context.Cause(ctx), &sig):
+		log.Info("exit", "result", "interrupted", "signal", sig.signalName(), "elapsed", elapsed, "code", sig.exitCode())
+		return sig.exitCode()
 	default:
-		mainLog.Error("exit", "result", "error", "err", err, "elapsed", elapsed, "code", exitError)
-		os.Exit(exitError)
+		log.Error("exit", "result", "error", "err", err, "elapsed", elapsed, "code", exitError)
+		return exitError
 	}
 }
 

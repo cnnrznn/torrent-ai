@@ -74,7 +74,12 @@ The last line is always `exit`, with `result`, `elapsed` and `code`.
 | 1    | error       | see `err` on the exit line               |
 | 2    |             | bad flags (message on stderr, no `exit`) |
 | 3    | timeout     | `-timeout` elapsed first                 |
-| 130  | interrupted | SIGINT                                   |
+| 130  | interrupted | SIGINT (Ctrl-C); `signal` names it       |
+| 143  | interrupted | SIGTERM (container or service stop)      |
+
+Either signal shuts down cleanly: `shutting down` is logged, profiles
+are written, telemetry is flushed and `exit` is the last line. A second
+signal exits at once.
 
 ## Events
 
@@ -100,7 +105,8 @@ match on it, not on the text of `err`.
 | `loaded torrent` | info | name, size, pieces, infohash |
 | `status` | info | every `-status-interval` (5s), see below |
 | `seeding` | info | |
-| `exit` | info/error | result, elapsed, code, err |
+| `shutting down` | info | signal, hint |
+| `exit` | info/error | result, signal, elapsed, code, err |
 
 `status` keys: `phase` (downloading, seeding), `pieces`/`of`/`percent`,
 `left`, `down`/`up` (bytes) and `down_rate`/`up_rate` (bytes/s over the
