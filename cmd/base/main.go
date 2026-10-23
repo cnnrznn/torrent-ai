@@ -18,7 +18,10 @@ func main() {
 		panic(err)
 	}
 
-	m := metainfo.New(string(bs))
+	m, err := metainfo.New(string(bs))
+	if err != nil {
+		panic(err)
+	}
 	fmt.Println(m)
 
 	t, err := tracker.New(m.Announce())
