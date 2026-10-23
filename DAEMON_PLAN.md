@@ -140,6 +140,30 @@ telemetry.
   The exact ingest request (parameters, profile formats, auth) gets
   checked against Pyroscope's documentation when implemented.
 
+### Telemetry auth and TLS
+
+Telemetry has to work both with a hosted service and with an
+unprotected Grafana or Pyroscope on a homelab. Auth and TLS are
+independent choices, for both the Pyroscope uploader and OTLP:
+
+| Setup | Auth | TLS |
+|---|---|---|
+| Homelab or dev | none | optional: `http://`, or `https://` |
+| Self-signed homelab cert | none or basic | a CA file (`-pyroscope-ca-file`, `-otel-ca-file`), or skip verification as an explicit opt-in that logs a warning |
+| Grafana Cloud | basic: the product's instance ID and a Cloud Access Policy token with write scopes only | system CAs |
+| Self-hosted multi-tenant | tenant header (`X-Scope-OrgID`), with or without basic | either |
+
+The scheme of the URL decides TLS. With no credentials configured,
+nothing is sent. Credentials come from flags or `TORRENT_AI_*`
+variables (a Kubernetes Secret in production) and are redacted from
+logs. `-otel-ca-file` maps to the standard
+`OTEL_EXPORTER_OTLP_CERTIFICATE`.
+
+GitHub OAuth isn't an option for this: Grafana uses it to log people
+into the web UI, not to authenticate data sent to ingestion endpoints.
+If keyless workload identity matters later, check what Grafana Cloud
+supports at that point and add it as another auth mode.
+
 ## Phases
 
 Each phase lands as small commits with tests, as before.
@@ -194,5 +218,6 @@ a pod replacement in a local cluster (kind).
 3. **Per-torrent metric attributes** on by default, with a flag to
    aggregate.
 4. **Seeding:** seed until removed; ratio and time limits are optional.
-5. **Pyroscope auth:** still open. The uploader will support both basic
-   auth and a tenant header (`X-Scope-OrgID`), configured by flag.
+5. **Telemetry auth:** none, basic, or a tenant header, with optional
+   TLS and a custom CA, so both Grafana Cloud and an unprotected homelab
+   instance work. See "Telemetry auth and TLS".
