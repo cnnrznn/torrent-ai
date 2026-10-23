@@ -81,3 +81,20 @@ func ReadHandshake(r io.Reader) (Handshake, error) {
 
 	return h, nil
 }
+
+// ClientName guesses the peer's client from its peer ID. Azureus-style
+// IDs ("-qB4630-...") give the client code and version; otherwise the
+// printable prefix is returned.
+func ClientName(peerID id.Hash) string {
+	if peerID[0] == '-' && peerID[7] == '-' {
+		return string(peerID[1:7])
+	}
+	b := make([]byte, 0, 8)
+	for _, c := range peerID[:8] {
+		if c < 0x20 || c > 0x7e {
+			c = '.'
+		}
+		b = append(b, c)
+	}
+	return string(b)
+}

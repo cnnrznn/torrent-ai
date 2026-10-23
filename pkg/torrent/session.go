@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cnnrznn/torrent-scratch/pkg/id"
@@ -50,9 +51,19 @@ type Stats struct {
 	Pieces     int
 	Have       int
 	Left       int64
-	Peers      int
 	Downloaded int64
 	Uploaded   int64
+
+	Peers      int // connected peers
+	UnchokedUs int // peers that let us request from them
+	Interested int // peers that have pieces we want
+	Requests   int // block requests in flight
+
+	Dials           int64 // outgoing connection attempts
+	DialFailures    int64 // outgoing attempts that failed
+	Accepted        int64 // incoming connections that completed a handshake
+	HashFailures    int64 // pieces that failed their SHA-1 check
+	RequestTimeouts int64 // block requests that went unanswered
 }
 
 // Session downloads and seeds one torrent. A single goroutine (Run)
@@ -69,6 +80,14 @@ type Session struct {
 	events     chan event
 	downloaded int64
 	uploaded   int64
+	started    time.Time
+
+	// sources records which peers sent blocks of each partial piece,
+	// so a hash failure can name its suspects.
+	sources map[int]map[netip.AddrPort]bool
+
+	dials, dialFailures, accepted atomic.Int64
+	hashFailures, timeouts        int64
 
 	complete     chan struct{}
 	completeOnce sync.Once
@@ -81,6 +100,12 @@ type peer struct {
 	conn *peerwire.Conn
 	addr netip.AddrPort
 	have peerwire.Bitfield
+
+	incoming    bool
+	client      string
+	connectedAt time.Time
+	downloaded  int64
+	uploaded    int64
 
 	amChoking      bool
 	amInterested   bool
@@ -97,8 +122,9 @@ type peer struct {
 type event any
 
 type peerConnected struct {
-	conn *peerwire.Conn
-	addr netip.AddrPort
+	conn     *peerwire.Conn
+	addr     netip.AddrPort
+	incoming bool
 }
 
 type peerMessage struct {
@@ -136,6 +162,7 @@ func New(m *metainfo.Metainfo, sw *swarm.Swarm, cfg Config) (*Session, error) {
 		peers:    map[*peer]struct{}{},
 		events:   make(chan event),
 		complete: make(chan struct{}),
+		sources:  map[int]map[netip.AddrPort]bool{},
 	}
 
 	if existed {
@@ -144,15 +171,18 @@ func New(m *metainfo.Metainfo, sw *swarm.Swarm, cfg Config) (*Session, error) {
 			return nil, err
 		}
 	}
+	s.updateStats()
+	st := s.Stats()
+	s.log.Info("session ready", "name", m.Name(), "pieces", st.Pieces, "have", st.Have, "left", st.Left, "resumed", existed)
 	if s.picker.complete() {
 		s.markComplete()
 	}
-	s.updateStats()
 
 	return s, nil
 }
 
 func (s *Session) verifyExisting() error {
+	start := time.Now()
 	buf := make([]byte, s.m.PieceLength())
 	for i := range s.m.NumPieces() {
 		b := buf[:s.m.PieceSize(i)]
@@ -163,7 +193,7 @@ func (s *Session) verifyExisting() error {
 			s.picker.have.Set(i)
 		}
 	}
-	s.log.Info("verified existing data", "have", s.picker.have.Count(), "pieces", s.m.NumPieces())
+	s.log.Info("verified existing data", "have", s.picker.have.Count(), "pieces", s.m.NumPieces(), "dur", time.Since(start))
 	return nil
 }
 
@@ -182,6 +212,7 @@ func (s *Session) Stats() Stats {
 
 // Run downloads and seeds until ctx is cancelled.
 func (s *Session) Run(ctx context.Context) error {
+	s.started = time.Now()
 	defer s.storage.Close()
 	defer func() {
 		for p := range s.peers {
@@ -241,14 +272,16 @@ func (s *Session) connectPeers(ctx context.Context) {
 		if !ok {
 			return
 		}
+		s.dials.Add(1)
 		go func() {
 			c, err := peerwire.Dial(ctx, addr, s.handshake())
 			if err != nil {
-				s.log.Debug("dial failed", "addr", addr, "err", err)
+				s.dialFailures.Add(1)
+				s.log.Debug("peer dial failed", "addr", addr, "err", err)
 				s.swarm.Release(addr, true)
 				return
 			}
-			if !s.send(ctx, peerConnected{c, addr}) {
+			if !s.send(ctx, peerConnected{c, addr, false}) {
 				c.Close()
 				s.swarm.Release(addr, false)
 			}
@@ -274,10 +307,12 @@ func (s *Session) acceptLoop(ctx context.Context, ln net.Listener) {
 		go func() {
 			c, err := peerwire.Accept(nc, s.handshake())
 			if err != nil {
+				s.log.Debug("peer accept failed", "addr", addr, "err", err)
 				s.swarm.Release(addr, true)
 				return
 			}
-			if !s.send(ctx, peerConnected{c, addr}) {
+			s.accepted.Add(1)
+			if !s.send(ctx, peerConnected{c, addr, true}) {
 				c.Close()
 				s.swarm.Release(addr, false)
 			}
@@ -288,13 +323,13 @@ func (s *Session) acceptLoop(ctx context.Context, ln net.Listener) {
 func (s *Session) handle(ctx context.Context, ev event) {
 	switch ev := ev.(type) {
 	case peerConnected:
-		s.addPeer(ctx, ev.conn, ev.addr)
+		s.addPeer(ctx, ev.conn, ev.addr, ev.incoming)
 	case peerMessage:
 		if _, ok := s.peers[ev.p]; !ok {
 			return
 		}
 		if err := s.handleMessage(ev.p, ev.msg); err != nil {
-			s.log.Debug("bad message", "addr", ev.p.addr, "msg", ev.msg.ID, "err", err)
+			s.log.Debug("peer protocol error", "addr", ev.p.addr, "client", ev.p.client, "msg", ev.msg.ID, "err", err)
 			ev.p.conn.Close()
 		}
 	case peerClosed:
@@ -302,17 +337,27 @@ func (s *Session) handle(ctx context.Context, ev event) {
 	}
 }
 
-func (s *Session) addPeer(ctx context.Context, c *peerwire.Conn, addr netip.AddrPort) {
+func (s *Session) addPeer(ctx context.Context, c *peerwire.Conn, addr netip.AddrPort, incoming bool) {
 	p := &peer{
 		conn:        c,
 		addr:        addr,
 		have:        peerwire.NewBitfield(s.m.NumPieces()),
+		incoming:    incoming,
+		client:      peerwire.ClientName(c.Peer.PeerID),
+		connectedAt: time.Now(),
 		amChoking:   true,
 		peerChoking: true,
 		requests:    map[block]time.Time{},
 	}
 	s.peers[p] = struct{}{}
-	s.log.Debug("peer connected", "addr", addr, "peers", len(s.peers))
+	s.log.Debug("peer connected",
+		"addr", addr,
+		"incoming", incoming,
+		"client", p.client,
+		"extensions", c.Peer.SupportsExtensions(),
+		"dht", c.Peer.SupportsDHT(),
+		"peers", len(s.peers),
+	)
 
 	go func() {
 		for m := range c.Messages() {
@@ -349,12 +394,25 @@ func (s *Session) removePeer(p *peer) {
 	}
 	s.picker.peerLeft(p.have)
 	s.swarm.Release(p.addr, true)
-	s.log.Debug("peer closed", "addr", p.addr, "err", p.conn.Err(), "peers", len(s.peers))
+	s.log.Debug("peer closed",
+		"addr", p.addr,
+		"incoming", p.incoming,
+		"client", p.client,
+		"err", p.conn.Err(),
+		"connected", time.Since(p.connectedAt).Round(time.Millisecond),
+		"down", p.downloaded,
+		"up", p.uploaded,
+		"had", p.have.Count(),
+		"peers", len(s.peers),
+	)
 }
 
 func (s *Session) handleMessage(p *peer, m peerwire.Message) error {
 	switch m.ID {
 	case peerwire.Choke:
+		if !p.peerChoking {
+			s.log.Debug("peer choked us", "addr", p.addr, "client", p.client, "dropped_requests", len(p.requests))
+		}
 		p.peerChoking = true
 		// A choke discards all our pending requests.
 		for b := range p.requests {
@@ -363,6 +421,9 @@ func (s *Session) handleMessage(p *peer, m peerwire.Message) error {
 		clear(p.requests)
 
 	case peerwire.Unchoke:
+		if p.peerChoking {
+			s.log.Debug("peer unchoked us", "addr", p.addr, "client", p.client)
+		}
 		p.peerChoking = false
 		s.fillRequests(p)
 
@@ -399,6 +460,7 @@ func (s *Session) handleMessage(p *peer, m peerwire.Message) error {
 		}
 		s.picker.peerLeft(p.have)
 		p.have = bf
+		s.log.Debug("peer bitfield", "addr", p.addr, "client", p.client, "has", bf.Count(), "pieces", s.m.NumPieces())
 		for i := range s.m.NumPieces() {
 			if bf.Has(i) {
 				s.picker.peerHas(i)
@@ -449,6 +511,7 @@ func (s *Session) handleExtended(p *peer, extID byte, payload []byte) error {
 			return err
 		}
 		p.utMetadata = h.M[peerwire.UTMetadata]
+		s.log.Debug("peer extensions", "addr", p.addr, "client", p.client, "v", h.V, "ut_metadata", p.utMetadata, "metadata_size", h.MetadataSize)
 
 	case peerwire.UTMetadataID:
 		req, err := peerwire.ParseMetadataMsg(payload)
@@ -500,6 +563,7 @@ func (s *Session) serveRequest(p *peer, index, begin, length int) error {
 	}
 	p.conn.Send(peerwire.MsgPiece(index, begin, data))
 	s.uploaded += int64(length)
+	p.uploaded += int64(length)
 	return nil
 }
 
@@ -513,6 +577,11 @@ func (s *Session) receiveBlock(p *peer, b block, data []byte) {
 	isNew, complete := s.picker.received(b, data)
 	if isNew {
 		s.downloaded += int64(len(data))
+		p.downloaded += int64(len(data))
+		if s.sources[b.piece] == nil {
+			s.sources[b.piece] = map[netip.AddrPort]bool{}
+		}
+		s.sources[b.piece][p.addr] = true
 	}
 
 	// Endgame: cancel the same block at other peers.
@@ -532,9 +601,17 @@ func (s *Session) receiveBlock(p *peer, b block, data []byte) {
 
 func (s *Session) finishPiece(i int) {
 	data := s.picker.pieceData(i)
+	sources := s.sources[i]
+	delete(s.sources, i)
+
 	ok := sha1.Sum(data) == s.m.PieceHash(i)
 	if !ok {
-		s.log.Warn("piece failed hash check", "piece", i)
+		s.hashFailures++
+		var from []string
+		for a := range sources {
+			from = append(from, a.String())
+		}
+		s.log.Warn("piece hash failed", "piece", i, "from", from)
 	} else if err := s.storage.WriteAt(data, int64(i)*int64(s.m.PieceLength())); err != nil {
 		s.log.Error("write failed", "piece", i, "err", err)
 		ok = false
@@ -557,7 +634,12 @@ func (s *Session) finishPiece(i int) {
 
 func (s *Session) markComplete() {
 	s.completeOnce.Do(func() {
-		s.log.Info("download complete", "name", s.m.Name())
+		attrs := []any{"name", s.m.Name(), "downloaded", s.downloaded, "hash_failures", s.hashFailures}
+		if !s.started.IsZero() {
+			dur := time.Since(s.started)
+			attrs = append(attrs, "dur", dur.Round(time.Millisecond), "avg_rate", int64(float64(s.downloaded)/dur.Seconds()))
+		}
+		s.log.Info("download complete", attrs...)
 		close(s.complete)
 	})
 }
@@ -601,15 +683,17 @@ func (s *Session) fillRequests(p *peer) {
 func (s *Session) expireRequests() {
 	now := time.Now()
 	for p := range s.peers {
-		expired := false
+		expired := 0
 		for b, sentAt := range p.requests {
 			if now.Sub(sentAt) > requestTimeout {
 				delete(p.requests, b)
 				s.picker.released(b)
-				expired = true
+				expired++
 			}
 		}
-		if expired {
+		if expired > 0 {
+			s.timeouts += int64(expired)
+			s.log.Debug("peer requests timed out", "addr", p.addr, "client", p.client, "expired", expired, "choked", p.peerChoking)
 			s.fillRequests(p)
 		}
 	}
@@ -623,14 +707,33 @@ func (s *Session) updateStats() {
 		}
 	}
 
+	var unchoked, interested, requests int
+	for p := range s.peers {
+		if !p.peerChoking {
+			unchoked++
+		}
+		if p.amInterested {
+			interested++
+		}
+		requests += len(p.requests)
+	}
+
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
 	s.stats = Stats{
-		Pieces:     s.m.NumPieces(),
-		Have:       s.picker.have.Count(),
-		Left:       left,
-		Peers:      len(s.peers),
-		Downloaded: s.downloaded,
-		Uploaded:   s.uploaded,
+		Pieces:          s.m.NumPieces(),
+		Have:            s.picker.have.Count(),
+		Left:            left,
+		Downloaded:      s.downloaded,
+		Uploaded:        s.uploaded,
+		Peers:           len(s.peers),
+		UnchokedUs:      unchoked,
+		Interested:      interested,
+		Requests:        requests,
+		Dials:           s.dials.Load(),
+		DialFailures:    s.dialFailures.Load(),
+		Accepted:        s.accepted.Load(),
+		HashFailures:    s.hashFailures,
+		RequestTimeouts: s.timeouts,
 	}
 }

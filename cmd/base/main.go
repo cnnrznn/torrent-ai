@@ -203,9 +203,11 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 	errc := make(chan error, 1)
 	go func() { errc <- s.Run(ctx) }()
 
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(statusInterval)
 	defer ticker.Stop()
 
+	phase := "downloading"
+	var last torrent.Stats
 	complete := s.Complete()
 	for {
 		select {
@@ -218,19 +220,48 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 				<-errc
 				return nil
 			}
+			phase = "seeding"
 			mainLog.Info("seeding; press ctrl-c to stop")
 		case <-ticker.C:
 			st := s.Stats()
-			mainLog.Info("progress",
-				"pieces", fmt.Sprintf("%d/%d", st.Have, st.Pieces),
-				"percent", fmt.Sprintf("%.1f", 100*float64(st.Have)/float64(st.Pieces)),
-				"peers", st.Peers,
-				"known", sw.Len(),
-				"down", st.Downloaded,
-				"up", st.Uploaded,
-			)
+			logStatus(mainLog, phase, st, last, sw, node)
+			last = st
 		}
 	}
+}
+
+// statusInterval is how often the status line is logged.
+const statusInterval = 5 * time.Second
+
+// logStatus writes the periodic one-line summary of the session.
+// Rates are bytes per second since the previous status line.
+func logStatus(log *slog.Logger, phase string, st, last torrent.Stats, sw *swarm.Swarm, node *dht.Server) {
+	secs := statusInterval.Seconds()
+	attrs := []any{
+		"phase", phase,
+		"pieces", st.Have,
+		"of", st.Pieces,
+		"percent", fmt.Sprintf("%.1f", 100*float64(st.Have)/float64(st.Pieces)),
+		"left", st.Left,
+		"down", st.Downloaded,
+		"down_rate", int64(float64(st.Downloaded-last.Downloaded) / secs),
+		"up", st.Uploaded,
+		"up_rate", int64(float64(st.Uploaded-last.Uploaded) / secs),
+		"peers", st.Peers,
+		"unchoked_us", st.UnchokedUs,
+		"interested", st.Interested,
+		"requests", st.Requests,
+		"known", sw.Len(),
+		"dials", st.Dials,
+		"dial_failures", st.DialFailures,
+		"accepted", st.Accepted,
+		"hash_failures", st.HashFailures,
+		"request_timeouts", st.RequestTimeouts,
+	}
+	if node != nil {
+		attrs = append(attrs, "dht_nodes", node.Nodes())
+	}
+	log.Info("status", attrs...)
 }
 
 func fromFile(path string) (*metainfo.Metainfo, error) {

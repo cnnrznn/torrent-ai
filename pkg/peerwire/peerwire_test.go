@@ -123,3 +123,12 @@ func TestBitfield(t *testing.T) {
 	_, err = ParseBitfield([]byte{0x80, 0x20}, 10)
 	require.ErrorContains(t, err, "spare bit")
 }
+
+func TestClientName(t *testing.T) {
+	h, _ := id.FromString("-qB4630-abcdefghijkl")
+	require.Equal(t, "qB4630", ClientName(h))
+	h, _ = id.FromString("M7-4-0--\x00\x01cdefghijkl")
+	require.Equal(t, "M7-4-0--", ClientName(h))
+	h, _ = id.FromString("\x00\x01\x02\x03\x04\x05\x06\x07abcdefghijkl")
+	require.Equal(t, "........", ClientName(h))
+}
