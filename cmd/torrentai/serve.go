@@ -126,6 +126,10 @@ func serve(ctx context.Context, log *slog.Logger, cfg config) error {
 		Session:   cfg.session,
 		Metadata:  cfg.metadata,
 	})
+	if err := registerDaemonMetrics(m, node, !cfg.aggregateMetrics); err != nil {
+		ln.Close()
+		return fmt.Errorf("metrics: %w", err)
+	}
 	mainLog.Info("daemon listening", "peer_port", port, "dht", node != nil, "state_dir", cfg.daemon.stateDir, "download_dir", downloadDir)
 
 	if _, err := m.Restore(); err != nil {

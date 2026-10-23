@@ -16,6 +16,11 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/cnnrznn/torrent-ai/pkg/dht"
 	"github.com/cnnrznn/torrent-ai/pkg/id"
 	"github.com/cnnrznn/torrent-ai/pkg/metainfo"
@@ -131,9 +136,17 @@ type Status struct {
 
 	Peers      int   `json:"peers"`
 	UnchokedUs int   `json:"unchoked_us"`
+	Interested int   `json:"interested"`
+	Requests   int   `json:"requests"`
 	KnownPeers int   `json:"known_peers"`
 	Banned     int   `json:"banned"`
 	Buffered   int64 `json:"buffered"`
+
+	Dials           int64 `json:"dials"`
+	DialFailures    int64 `json:"dial_failures"`
+	Accepted        int64 `json:"accepted"`
+	HashFailures    int64 `json:"hash_failures"`
+	RequestTimeouts int64 `json:"request_timeouts"`
 }
 
 // Errors from Manager methods.
@@ -437,6 +450,19 @@ func (m *Manager) newSwarm() *swarm.Swarm {
 // runTorrent starts a torrent's peer sources, fetches its metadata if
 // needed, and runs its session until ctx is cancelled.
 func (m *Manager) runTorrent(ctx context.Context, e *entry, trackers []string) {
+	// A span for the torrent's life in the daemon; the metadata fetch,
+	// session and tracker announces are its children.
+	ctx, span := otel.Tracer("github.com/cnnrznn/torrent-ai/pkg/daemon").Start(ctx, "daemon.torrent",
+		trace.WithAttributes(attribute.String("torrent.infohash", e.infoHash.Hex()), attribute.String("torrent.dir", e.src.Dir)))
+	defer func() {
+		st := e.status()
+		span.SetAttributes(attribute.String("torrent.name", st.Name), attribute.String("torrent.state", string(st.State)))
+		if st.State == StateFailed {
+			span.SetStatus(codes.Error, st.Error)
+		}
+		span.End()
+	}()
+
 	log := e.log
 	e.swarm.Add(e.src.Peers...)
 	if node := m.cfg.DHT; node != nil {
@@ -705,6 +731,9 @@ func (e *entry) status() Status {
 		st.Have, st.Left = s.Have, s.Left
 		st.Downloaded, st.Uploaded = s.Downloaded, s.Uploaded
 		st.Peers, st.UnchokedUs, st.Buffered = s.Peers, s.UnchokedUs, s.Buffered
+		st.Interested, st.Requests = s.Interested, s.Requests
+		st.Dials, st.DialFailures, st.Accepted = s.Dials, s.DialFailures, s.Accepted
+		st.HashFailures, st.RequestTimeouts = s.HashFailures, s.RequestTimeouts
 	}
 	return st
 }

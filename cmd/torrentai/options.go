@@ -45,6 +45,8 @@ type config struct {
 	dhtStatsInterval time.Duration
 	dhtSaveInterval  time.Duration
 
+	aggregateMetrics bool
+
 	seedRatio float64
 	seedTime  time.Duration
 
@@ -132,6 +134,7 @@ func registerFlags(r *registry, cfg *config) {
 	r.str(&cfg.otel.resourceAttrs, "otel-resource-attributes", "extra resource attributes as key=value,key=value (OTEL_RESOURCE_ATTRIBUTES)")
 	r.str(&cfg.otel.sampleRatio, "otel-sample-ratio", "fraction of traces to keep, 0 to 1 (sets OTEL_TRACES_SAMPLER=parentbased_traceidratio; default keeps all)")
 	r.duration(&cfg.otel.metricInterval, "otel-metric-interval", 0, "how often metrics are exported (OTEL_METRIC_EXPORT_INTERVAL; default 1m)", "")
+	r.boolean(&cfg.aggregateMetrics, "otel-aggregate-torrents", "serve: sum torrent metrics across torrents instead of labeling each with torrent.infohash and torrent.name")
 
 	r.group("Peers")
 	r.list(&cfg.peers, "peer", "peer address (host:port) to connect to directly; repeatable or comma-separated")

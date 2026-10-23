@@ -73,6 +73,29 @@ func registerMetrics(sess *atomic.Pointer[torrent.Session], sw *swarm.Swarm, nod
 	}
 	observables = append(observables, known, banned)
 
+	_, err = m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		o.ObserveInt64(known, int64(sw.Len()))
+		o.ObserveInt64(banned, int64(sw.Banned()))
+
+		if s := sess.Load(); s != nil {
+			st := s.Stats()
+			for i, g := range sessionGauges {
+				o.ObserveInt64(sessionGaugeInst[i], g.value(st))
+			}
+			for i, g := range sessionCounters {
+				o.ObserveInt64(sessionCounterInst[i], g.value(st))
+			}
+		}
+		return nil
+	}, observables...)
+	if err != nil || node == nil {
+		return err
+	}
+	return registerDHTMetrics(m, node)
+}
+
+// registerDHTMetrics exports the DHT node's counters.
+func registerDHTMetrics(m metric.Meter, node *dht.Server) error {
 	type dhtMetric struct {
 		name, unit, desc string
 		counter          bool
@@ -90,50 +113,29 @@ func registerMetrics(sess *atomic.Pointer[torrent.Session], sw *swarm.Swarm, nod
 		{"dht.announces.received", "{announce}", "announce_peer queries we accepted", true, func(s dht.Stats) int64 { return s.Announced }},
 		{"dht.bad_packets", "{packet}", "Packets we couldn't decode", true, func(s dht.Stats) int64 { return s.BadPackets }},
 	}
-	dhtInst := make([]metric.Observable, len(dhtMetrics))
-	if node != nil {
-		for i, d := range dhtMetrics {
-			var inst metric.Observable
-			var err error
-			if d.counter {
-				inst, err = m.Int64ObservableCounter(d.name, metric.WithUnit(d.unit), metric.WithDescription(d.desc))
-			} else {
-				inst, err = m.Int64ObservableGauge(d.name, metric.WithUnit(d.unit), metric.WithDescription(d.desc))
-			}
-			if err != nil {
-				return err
-			}
-			dhtInst[i] = inst
-			observables = append(observables, inst)
+	insts := make([]metric.Observable, len(dhtMetrics))
+	for i, d := range dhtMetrics {
+		var err error
+		if d.counter {
+			insts[i], err = m.Int64ObservableCounter(d.name, metric.WithUnit(d.unit), metric.WithDescription(d.desc))
+		} else {
+			insts[i], err = m.Int64ObservableGauge(d.name, metric.WithUnit(d.unit), metric.WithDescription(d.desc))
+		}
+		if err != nil {
+			return err
 		}
 	}
-
-	_, err = m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
-		o.ObserveInt64(known, int64(sw.Len()))
-		o.ObserveInt64(banned, int64(sw.Banned()))
-
-		if s := sess.Load(); s != nil {
-			st := s.Stats()
-			for i, g := range sessionGauges {
-				o.ObserveInt64(sessionGaugeInst[i], g.value(st))
-			}
-			for i, g := range sessionCounters {
-				o.ObserveInt64(sessionCounterInst[i], g.value(st))
-			}
-		}
-
-		if node != nil {
-			st := node.Stats()
-			for i, d := range dhtMetrics {
-				switch inst := dhtInst[i].(type) {
-				case metric.Int64ObservableCounter:
-					o.ObserveInt64(inst, d.value(st))
-				case metric.Int64ObservableGauge:
-					o.ObserveInt64(inst, d.value(st))
-				}
+	_, err := m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		st := node.Stats()
+		for i, d := range dhtMetrics {
+			switch inst := insts[i].(type) {
+			case metric.Int64ObservableCounter:
+				o.ObserveInt64(inst, d.value(st))
+			case metric.Int64ObservableGauge:
+				o.ObserveInt64(inst, d.value(st))
 			}
 		}
 		return nil
-	}, observables...)
+	}, insts...)
 	return err
 }
