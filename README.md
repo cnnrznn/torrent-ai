@@ -73,6 +73,8 @@ watching a terminal:
 
 [DEBUGGING.md](DEBUGGING.md) lists every event and its keys, `jq`
 recipes, and how to get from a symptom to the log lines that explain it.
+[LEARNINGS.md](LEARNINGS.md) collects what the logs, counters, traces
+and profiles showed along the way.
 
 ### What the loop found
 
