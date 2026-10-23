@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
 	"time"
 
+	"github.com/cnnrznn/torrent-scratch/pkg/dht"
 	"github.com/cnnrznn/torrent-scratch/pkg/id"
 	"github.com/cnnrznn/torrent-scratch/pkg/metainfo"
 	"github.com/cnnrznn/torrent-scratch/pkg/swarm"
@@ -18,13 +20,23 @@ import (
 	"github.com/cnnrznn/torrent-scratch/pkg/tracker"
 )
 
+// dhtInterval is how often the DHT lookup for the torrent repeats.
+const dhtInterval = 5 * time.Minute
+
+type config struct {
+	dir  string
+	port int
+	seed bool
+	dht  bool
+}
+
 func main() {
-	var (
-		dir     = flag.String("o", ".", "directory to download into")
-		port    = flag.Int("port", 6881, "port to listen on for peers")
-		seed    = flag.Bool("seed", false, "keep seeding after the download completes")
-		verbose = flag.Bool("v", false, "verbose logging")
-	)
+	var cfg config
+	flag.StringVar(&cfg.dir, "o", ".", "directory to download into")
+	flag.IntVar(&cfg.port, "port", 6881, "TCP port for peers, and UDP port for the DHT")
+	flag.BoolVar(&cfg.seed, "seed", false, "keep seeding after the download completes")
+	flag.BoolVar(&cfg.dht, "dht", true, "find peers through the DHT")
+	verbose := flag.Bool("v", false, "verbose logging")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: %s [flags] <file.torrent | magnet:?...>\n", os.Args[0])
 		flag.PrintDefaults()
@@ -44,42 +56,82 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	if err := run(ctx, log, flag.Arg(0), *dir, *port, *seed); err != nil && ctx.Err() == nil {
+	if err := run(ctx, log, flag.Arg(0), cfg); err != nil && ctx.Err() == nil {
 		log.Error(err.Error())
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, log *slog.Logger, arg, dir string, port int, seed bool) error {
+func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	peerID := id.NewPeerID()
 	sw := swarm.New(50)
 
+	// A .torrent gives us the metainfo up front; a magnet gives only
+	// the infohash and maybe some trackers.
 	var m *metainfo.Metainfo
+	var mag *metainfo.Magnet
+	var infoHash id.Hash
 	var err error
 	if strings.HasPrefix(arg, "magnet:") {
-		m, err = fromMagnet(ctx, log, sw, arg, peerID, port)
+		if mag, err = metainfo.ParseMagnet(arg); err != nil {
+			return err
+		}
+		infoHash = mag.InfoHash
 	} else {
-		m, err = fromFile(arg)
+		if m, err = fromFile(arg); err != nil {
+			return err
+		}
+		infoHash = m.InfoHash()
 	}
+
+	var node *dht.Server
+	if cfg.dht {
+		node, err = dht.New(dht.Config{Addr: fmt.Sprintf(":%d", cfg.port), Logger: log})
+		if err != nil {
+			return err
+		}
+		go node.Run(ctx)
+		go dhtPeers(ctx, log, node, sw, infoHash, cfg.port)
+	}
+
+	if mag != nil {
+		log.Info("fetching metadata", "name", mag.Name, "infohash", infoHash.Hex(), "trackers", len(mag.Trackers))
+		for _, tr := range mag.Trackers {
+			go announce(ctx, log, sw, tr, tracker.Request{
+				InfoHash: infoHash,
+				PeerID:   peerID,
+				Port:     cfg.port,
+				// The size is unknown until we have the metadata; any
+				// non-zero value marks us as a leecher.
+				Left:  1,
+				Event: tracker.EventStarted,
+			})
+		}
+		if m, err = torrent.FetchMetadata(ctx, sw, infoHash, peerID, log); err != nil {
+			return err
+		}
+	}
+	log.Info("loaded torrent", "name", m.Name(), "size", m.Length(), "pieces", m.NumPieces(), "infohash", infoHash.Hex())
+
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.port))
 	if err != nil {
 		return err
 	}
-	log.Info("loaded torrent", "name", m.Name(), "size", m.Length(), "pieces", m.NumPieces(), "infohash", m.InfoHash().Hex())
 
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return err
-	}
-
-	s, err := torrent.New(m, sw, torrent.Config{
-		Dir:      dir,
+	sessCfg := torrent.Config{
+		Dir:      cfg.dir,
 		PeerID:   peerID,
 		Listener: ln,
 		Logger:   log,
-	})
+	}
+	if node != nil {
+		sessCfg.DHTPort = cfg.port
+		sessCfg.OnPort = node.AddNode
+	}
+	s, err := torrent.New(m, sw, sessCfg)
 	if err != nil {
 		ln.Close()
 		return err
@@ -87,9 +139,9 @@ func run(ctx context.Context, log *slog.Logger, arg, dir string, port int, seed 
 
 	if m.Announce() != "" {
 		go announce(ctx, log, sw, m.Announce(), tracker.Request{
-			InfoHash: m.InfoHash(),
+			InfoHash: infoHash,
 			PeerID:   peerID,
-			Port:     port,
+			Port:     cfg.port,
 			Left:     int(s.Stats().Left),
 			Event:    tracker.EventStarted,
 		})
@@ -108,7 +160,7 @@ func run(ctx context.Context, log *slog.Logger, arg, dir string, port int, seed 
 			return err
 		case <-complete:
 			complete = nil
-			if !seed {
+			if !cfg.seed {
 				cancel()
 				<-errc
 				return nil
@@ -136,30 +188,6 @@ func fromFile(path string) (*metainfo.Metainfo, error) {
 	return metainfo.New(string(bs))
 }
 
-// fromMagnet announces to the magnet's trackers and fetches the info
-// dict from the peers they return.
-func fromMagnet(ctx context.Context, log *slog.Logger, sw *swarm.Swarm, uri string, peerID id.Hash, port int) (*metainfo.Metainfo, error) {
-	mag, err := metainfo.ParseMagnet(uri)
-	if err != nil {
-		return nil, err
-	}
-	log.Info("fetching metadata", "name", mag.Name, "infohash", mag.InfoHash.Hex(), "trackers", len(mag.Trackers))
-
-	for _, tr := range mag.Trackers {
-		go announce(ctx, log, sw, tr, tracker.Request{
-			InfoHash: mag.InfoHash,
-			PeerID:   peerID,
-			Port:     port,
-			// The size is unknown until we have the metadata; any
-			// non-zero value marks us as a leecher.
-			Left:  1,
-			Event: tracker.EventStarted,
-		})
-	}
-
-	return torrent.FetchMetadata(ctx, sw, mag.InfoHash, peerID, log)
-}
-
 func announce(ctx context.Context, log *slog.Logger, sw *swarm.Swarm, url string, req tracker.Request) {
 	t, err := tracker.New(url)
 	if err != nil {
@@ -173,4 +201,35 @@ func announce(ctx context.Context, log *slog.Logger, sw *swarm.Swarm, url string
 	}
 	log.Info("tracker returned peers", "url", url, "peers", len(res.Peers))
 	sw.Add(res.Peers...)
+}
+
+// dhtPeers joins the DHT and repeatedly looks up and announces the
+// torrent, feeding the peers it finds into the swarm.
+func dhtPeers(ctx context.Context, log *slog.Logger, node *dht.Server, sw *swarm.Swarm, infoHash id.Hash, port int) {
+	for {
+		if node.Nodes() == 0 {
+			if err := node.Bootstrap(ctx, dht.DefaultRouters); err != nil {
+				log.Warn("dht bootstrap failed", "err", err)
+			} else {
+				log.Info("joined dht", "nodes", node.Nodes())
+			}
+		}
+
+		found := 0
+		err := node.Announce(ctx, infoHash, port, func(peers []netip.AddrPort) {
+			found += len(peers)
+			sw.Add(peers...)
+		})
+		if err != nil && ctx.Err() == nil {
+			log.Warn("dht lookup failed", "err", err)
+		} else {
+			log.Info("dht lookup done", "peers", found, "nodes", node.Nodes())
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(dhtInterval):
+		}
+	}
 }
