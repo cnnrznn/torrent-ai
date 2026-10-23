@@ -92,6 +92,7 @@ type State string
 
 const (
 	StateMetadata    State = "metadata"    // fetching the info dict
+	StateVerifying   State = "verifying"   // checking data already on disk
 	StateDownloading State = "downloading" // downloading pieces
 	StateSeeding     State = "seeding"     // complete, serving others
 	StateFailed      State = "failed"      // stopped by an error; see Status.Error
@@ -381,7 +382,7 @@ func (m *Manager) add(src Source, addedAt time.Time, persist bool) (id.Hash, err
 		meta:     meta,
 	}
 	if meta != nil {
-		e.state = StateDownloading
+		e.state = StateVerifying
 	}
 	m.torrents[infoHash] = e
 
@@ -472,6 +473,9 @@ func (m *Manager) runTorrent(ctx context.Context, e *entry, trackers []string) {
 		sessCfg.DHTPort = int(node.Addr().Port())
 		sessCfg.OnPort = node.AddNode
 	}
+	e.mu.Lock()
+	e.state = StateVerifying
+	e.mu.Unlock()
 	sess, err := torrent.New(meta, e.swarm, sessCfg)
 	if err != nil {
 		e.finish(ctx, log, err)

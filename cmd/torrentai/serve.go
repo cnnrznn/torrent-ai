@@ -237,6 +237,7 @@ func logDaemonStatusEvery(ctx context.Context, log *slog.Logger, m *daemon.Manag
 		attrs := []any{
 			"torrents", len(list),
 			"metadata", states[daemon.StateMetadata],
+			"verifying", states[daemon.StateVerifying],
 			"downloading", states[daemon.StateDownloading],
 			"seeding", states[daemon.StateSeeding],
 			"failed", states[daemon.StateFailed],

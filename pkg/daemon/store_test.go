@@ -101,7 +101,7 @@ func TestRestore(t *testing.T) {
 	require.Equal(t, 1, n)
 	st, err := m2.Status(a.meta.InfoHash())
 	require.NoError(t, err)
-	require.NotEqual(t, StateMetadata, st.State, "the cached info dict skips the metadata fetch")
+	require.Contains(t, []State{StateVerifying, StateDownloading}, st.State, "the cached info dict skips the metadata fetch")
 	require.Equal(t, "a.bin", st.Name)
 
 	st = waitState(t, m2, a, StateSeeding)
