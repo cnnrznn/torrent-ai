@@ -17,12 +17,16 @@ func startServer(t *testing.T, ctx context.Context) *Server {
 	s, err := New(Config{Addr: "127.0.0.1:0", QueryTimeout: 500 * time.Millisecond})
 	require.NoError(t, err)
 
+	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		s.Run(ctx)
 		close(done)
 	}()
-	t.Cleanup(func() { <-done })
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 	return s
 }
 
