@@ -171,3 +171,18 @@ func (t *table) len() int {
 	}
 	return n
 }
+
+// good returns the table's nodes that haven't failed too often.
+func (t *table) good() []node {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var nodes []node
+	for _, b := range t.buckets {
+		for _, e := range b {
+			if e.failures < t.maxFailures {
+				nodes = append(nodes, e.node)
+			}
+		}
+	}
+	return nodes
+}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/cnnrznn/torrent-ai/pkg/dht"
 	"github.com/cnnrznn/torrent-ai/pkg/id"
 	"github.com/cnnrznn/torrent-ai/pkg/swarm"
 )
@@ -116,4 +117,19 @@ func TestRestore(t *testing.T) {
 	records, err := store.Records()
 	require.NoError(t, err)
 	require.Empty(t, records)
+}
+
+func TestStoreDHT(t *testing.T) {
+	s, err := OpenStore(t.TempDir())
+	require.NoError(t, err)
+	_, ok, err := s.LoadDHT()
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	want := DHTState{ID: id.Random().Hex(), Nodes: []dht.NodeInfo{{ID: id.Random().Hex(), Addr: "1.2.3.4:6881"}}, SavedAt: time.Now().UTC().Round(time.Second)}
+	require.NoError(t, s.SaveDHT(want))
+	got, ok, err := s.LoadDHT()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, want, got)
 }

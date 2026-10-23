@@ -103,3 +103,37 @@ func candidateNodes(cs []*candidate) []node {
 	}
 	return out
 }
+
+func TestSeedFromSavedNodes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	nodes := startNetwork(t, ctx, 15)
+
+	saved := nodes[3].GoodNodes()
+	require.Greater(t, len(saved), K)
+
+	// A fresh node seeded from the saved table can look up straight
+	// away, with no bootstrap.
+	fresh := startServer(t, ctx)
+	// Full far buckets keep only k nodes each, so not every saved node
+	// fits.
+	added := fresh.Seed(saved)
+	require.GreaterOrEqual(t, added, K)
+	require.Equal(t, added, fresh.Nodes())
+	infoHash := id.Random()
+	_, err := nodes[7].Announce(ctx, infoHash, 7000, nil)
+	require.NoError(t, err)
+
+	found := false
+	_, err = fresh.GetPeers(ctx, infoHash, func(peers []netip.AddrPort) {
+		for _, p := range peers {
+			if p.Port() == 7000 {
+				found = true
+			}
+		}
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+
+	require.Zero(t, fresh.Seed([]NodeInfo{{ID: "zz", Addr: "1.2.3.4:5"}, {ID: id.Random().Hex(), Addr: "nope"}}))
+}

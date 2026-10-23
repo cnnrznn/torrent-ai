@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cnnrznn/torrent-ai/pkg/dht"
 	"github.com/cnnrznn/torrent-ai/pkg/id"
 )
 
@@ -124,6 +125,43 @@ func (s *Store) Records() ([]Record, error) {
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// DHTState is the DHT node's identity and routing table, saved so a
+// restart keeps its node ID and doesn't bootstrap from scratch.
+type DHTState struct {
+	ID      string         `json:"id"`
+	Nodes   []dht.NodeInfo `json:"nodes"`
+	SavedAt time.Time      `json:"saved_at"`
+}
+
+func (s *Store) dhtPath() string {
+	return filepath.Join(s.dir, "dht-nodes.json")
+}
+
+// SaveDHT saves the DHT node's state.
+func (s *Store) SaveDHT(st DHTState) error {
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(s.dhtPath(), b)
+}
+
+// LoadDHT returns the saved DHT state, if any.
+func (s *Store) LoadDHT() (DHTState, bool, error) {
+	var st DHTState
+	b, err := os.ReadFile(s.dhtPath())
+	if errors.Is(err, fs.ErrNotExist) {
+		return st, false, nil
+	}
+	if err != nil {
+		return st, false, err
+	}
+	if err := json.Unmarshal(b, &st); err != nil {
+		return st, false, fmt.Errorf("dht-nodes.json: %w", err)
+	}
+	return st, true, nil
 }
 
 func writeFileAtomic(path string, b []byte) error {
