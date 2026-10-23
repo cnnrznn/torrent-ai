@@ -19,6 +19,11 @@ import (
 )
 
 const (
+	// maxHashFailures is how many failed pieces a peer may contribute
+	// to before it is banned. A peer that alone sent a failed piece is
+	// banned at once.
+	maxHashFailures = 3
+
 	defaultMaxInFlight = 16
 	requestTimeout     = time.Minute
 	maxRequestLength   = 128 * 1024
@@ -106,6 +111,7 @@ type peer struct {
 	connectedAt time.Time
 	downloaded  int64
 	uploaded    int64
+	hashFails   int
 
 	amChoking      bool
 	amInterested   bool
@@ -612,6 +618,7 @@ func (s *Session) finishPiece(i int) {
 			from = append(from, a.String())
 		}
 		s.log.Warn("piece hash failed", "piece", i, "from", from)
+		s.blame(sources)
 	} else if err := s.storage.WriteAt(data, int64(i)*int64(s.m.PieceLength())); err != nil {
 		s.log.Error("write failed", "piece", i, "err", err)
 		ok = false
@@ -629,6 +636,37 @@ func (s *Session) finishPiece(i int) {
 	if s.picker.complete() {
 		s.markComplete()
 		s.updateStats()
+	}
+}
+
+// blame records a failed piece against the peers that sent it, and
+// bans any that are clearly at fault.
+func (s *Session) blame(sources map[netip.AddrPort]bool) {
+	for addr := range sources {
+		var p *peer
+		for q := range s.peers {
+			if q.addr == addr {
+				p = q
+				break
+			}
+		}
+
+		strikes := 1
+		if p != nil {
+			p.hashFails++
+			strikes = p.hashFails
+		}
+		if len(sources) > 1 && strikes < maxHashFailures {
+			continue
+		}
+
+		s.swarm.Ban(addr.Addr())
+		client := ""
+		if p != nil {
+			client = p.client
+			p.conn.Close()
+		}
+		s.log.Warn("peer banned", "addr", addr, "client", client, "reason", "sent pieces that failed the hash check", "strikes", strikes, "sole_source", len(sources) == 1)
 	}
 }
 

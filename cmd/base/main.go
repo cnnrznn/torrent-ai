@@ -252,6 +252,7 @@ func logStatus(log *slog.Logger, phase string, st, last torrent.Stats, sw *swarm
 		"interested", st.Interested,
 		"requests", st.Requests,
 		"known", sw.Len(),
+		"banned", sw.Banned(),
 		"dials", st.Dials,
 		"dial_failures", st.DialFailures,
 		"accepted", st.Accepted,

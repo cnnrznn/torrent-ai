@@ -23,6 +23,7 @@ type entry struct {
 type Swarm struct {
 	mu      sync.Mutex
 	addrs   map[netip.AddrPort]*entry
+	banned  map[netip.Addr]bool
 	limit   int
 	active  int
 	notify  chan struct{}
@@ -33,6 +34,7 @@ type Swarm struct {
 func New(limit int) *Swarm {
 	return &Swarm{
 		addrs:   map[netip.AddrPort]*entry{},
+		banned:  map[netip.Addr]bool{},
 		limit:   limit,
 		notify:  make(chan struct{}, 1),
 		nowFunc: time.Now,
@@ -77,7 +79,7 @@ func (s *Swarm) Next() (netip.AddrPort, bool) {
 
 	now := s.nowFunc()
 	for a, e := range s.addrs {
-		if e.active || now.Before(e.retryAt) {
+		if e.active || now.Before(e.retryAt) || s.banned[a.Addr()] {
 			continue
 		}
 		e.active = true
@@ -96,7 +98,7 @@ func (s *Swarm) Acquire(a netip.AddrPort) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.active >= s.limit {
+	if s.active >= s.limit || s.banned[a.Addr()] {
 		return false
 	}
 	e, ok := s.addrs[a]
@@ -135,6 +137,21 @@ func (s *Swarm) Release(a netip.AddrPort, failed bool) {
 		e.failures = 0
 		e.retryAt = time.Time{}
 	}
+}
+
+// Ban stops handing out, or accepting connections from, any address
+// with this IP. Slots already held are still returned with Release.
+func (s *Swarm) Ban(ip netip.Addr) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.banned[ip.Unmap()] = true
+}
+
+// Banned returns the number of banned IPs.
+func (s *Swarm) Banned() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.banned)
 }
 
 // Notify returns a channel that receives a value after new addresses

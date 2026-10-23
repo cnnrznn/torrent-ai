@@ -216,3 +216,36 @@ func TestSessionDHTPort(t *testing.T) {
 		}
 	})
 }
+
+func TestSessionRecoversFromBadData(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m, data := makeTorrent(t, 32*1024, 300_000)
+
+	// The liar verifies good data on startup, then its file is
+	// corrupted underneath it, so it serves blocks that fail the hash.
+	liarDir := t.TempDir()
+	writeContent(t, liarDir, m, data)
+	_, liarAddr := startSession(t, ctx, m, liarDir)
+	bad := append([]byte(nil), data...)
+	for i := range bad {
+		bad[i] ^= 0xff
+	}
+	writeContent(t, liarDir, m, bad)
+
+	honestDir := t.TempDir()
+	writeContent(t, honestDir, m, data)
+	_, honestAddr := startSession(t, ctx, m, honestDir)
+
+	dir := t.TempDir()
+	leech, _ := startSession(t, ctx, m, dir, liarAddr, honestAddr)
+	waitComplete(t, leech)
+
+	require.Equal(t, data, readContent(t, dir, m))
+	st := leech.Stats()
+	require.Positive(t, st.HashFailures)
+	require.LessOrEqual(t, st.HashFailures, int64(maxHashFailures))
+	require.Less(t, st.Downloaded, 3*int64(len(data)), "bad data must not be re-fetched endlessly")
+	require.Equal(t, 1, leech.swarm.Banned())
+}

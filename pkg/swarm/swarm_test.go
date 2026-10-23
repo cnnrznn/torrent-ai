@@ -93,3 +93,19 @@ func TestSwarm(t *testing.T) {
 		require.Zero(t, s.Len())
 	})
 }
+
+func TestBan(t *testing.T) {
+	s := New(10)
+	s.Add(a, b)
+	s.Ban(a.Addr())
+	require.Equal(t, 1, s.Banned())
+
+	for {
+		addr, ok := s.Next()
+		if !ok {
+			break
+		}
+		require.NotEqual(t, a.Addr(), addr.Addr())
+	}
+	require.False(t, s.Acquire(netip.AddrPortFrom(a.Addr(), 9999)), "banned by IP, any port")
+}
