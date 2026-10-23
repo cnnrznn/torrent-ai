@@ -13,6 +13,7 @@ import (
 
 	"github.com/cnnrznn/torrent-scratch/pkg/id"
 	"github.com/cnnrznn/torrent-scratch/pkg/metainfo"
+	"github.com/cnnrznn/torrent-scratch/pkg/peerwire"
 	"github.com/cnnrznn/torrent-scratch/pkg/swarm"
 )
 
@@ -142,4 +143,22 @@ func TestSessionDownload(t *testing.T) {
 		require.Equal(t, data, readContent(t, dir, m))
 		require.Less(t, leech.Stats().Downloaded, int64(len(data)))
 	})
+}
+
+func TestSessionServesMetadata(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m, data := makeTorrent(t, 32*1024, 100_000)
+	dir := t.TempDir()
+	writeContent(t, dir, m, data)
+	_, addr := startSession(t, ctx, m, dir)
+
+	c, err := peerwire.Dial(ctx, addr, peerwire.NewHandshake(m.InfoHash(), id.NewPeerID(), false))
+	require.NoError(t, err)
+	defer c.Close()
+
+	info, err := peerwire.FetchMetadata(ctx, c, m.InfoHash())
+	require.NoError(t, err)
+	require.Equal(t, m.RawInfo(), info)
 }

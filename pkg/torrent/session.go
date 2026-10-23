@@ -82,6 +82,10 @@ type peer struct {
 	peerInterested bool
 
 	requests map[block]time.Time
+
+	// utMetadata is the peer's extended message ID for ut_metadata, or
+	// 0 if it doesn't support it.
+	utMetadata int
 }
 
 type event any
@@ -313,6 +317,13 @@ func (s *Session) addPeer(ctx context.Context, c *peerwire.Conn, addr netip.Addr
 		s.send(ctx, peerClosed{p})
 	}()
 
+	if c.Peer.SupportsExtensions() {
+		hs := peerwire.ExtHandshake{
+			M:            map[string]int{peerwire.UTMetadata: peerwire.UTMetadataID},
+			MetadataSize: len(s.m.RawInfo()),
+		}
+		c.Send(peerwire.MsgExtended(peerwire.ExtHandshakeID, hs.Encode()))
+	}
 	if s.picker.have.Count() > 0 {
 		c.Send(peerwire.MsgBitfield(s.picker.have))
 	}
@@ -400,9 +411,56 @@ func (s *Session) handleMessage(p *peer, m peerwire.Message) error {
 			return err
 		}
 		s.receiveBlock(p, block{index, begin, len(data)}, data)
+
+	case peerwire.Extended:
+		extID, payload, err := m.ParseExtended()
+		if err != nil {
+			return err
+		}
+		return s.handleExtended(p, extID, payload)
 	}
 
 	return nil
+}
+
+func (s *Session) handleExtended(p *peer, extID byte, payload []byte) error {
+	switch extID {
+	case peerwire.ExtHandshakeID:
+		h, err := peerwire.ParseExtHandshake(payload)
+		if err != nil {
+			return err
+		}
+		p.utMetadata = h.M[peerwire.UTMetadata]
+
+	case peerwire.UTMetadataID:
+		req, err := peerwire.ParseMetadataMsg(payload)
+		if err != nil {
+			return err
+		}
+		if req.Type != peerwire.MetadataRequest || p.utMetadata == 0 {
+			return nil
+		}
+		s.serveMetadata(p, req.Piece)
+	}
+	return nil
+}
+
+// serveMetadata answers a ut_metadata request with a piece of our info
+// dict, or a reject if the piece doesn't exist.
+func (s *Session) serveMetadata(p *peer, piece int) {
+	info := s.m.RawInfo()
+	begin := piece * peerwire.MetadataPieceSize
+
+	res := peerwire.MetadataMsg{Type: peerwire.MetadataReject, Piece: piece}
+	if piece >= 0 && begin < len(info) {
+		res = peerwire.MetadataMsg{
+			Type:      peerwire.MetadataData,
+			Piece:     piece,
+			TotalSize: len(info),
+			Data:      []byte(info[begin:min(begin+peerwire.MetadataPieceSize, len(info))]),
+		}
+	}
+	p.conn.Send(peerwire.MsgExtended(byte(p.utMetadata), res.Encode()))
 }
 
 func (s *Session) serveRequest(p *peer, index, begin, length int) error {
