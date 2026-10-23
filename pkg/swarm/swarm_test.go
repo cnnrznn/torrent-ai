@@ -128,3 +128,26 @@ func TestBackoffConfig(t *testing.T) {
 		now = now.Add(time.Millisecond)
 	}
 }
+
+func TestSharedLimiter(t *testing.T) {
+	l := NewLimiter(2)
+	s1 := New(Config{MaxPeers: 10, Limiter: l})
+	s2 := New(Config{MaxPeers: 10, Limiter: l})
+	s1.Add(a, b)
+	s2.Add(netip.MustParseAddrPort("10.0.0.3:1"), netip.MustParseAddrPort("10.0.0.4:1"))
+
+	x, ok := s1.Next()
+	require.True(t, ok)
+	_, ok = s2.Next()
+	require.True(t, ok)
+	require.Equal(t, 2, l.Active())
+
+	_, ok = s1.Next()
+	require.False(t, ok, "the shared cap is reached")
+	require.False(t, s2.Acquire(netip.MustParseAddrPort("10.0.0.9:9")))
+
+	s1.Release(x, false)
+	require.Equal(t, 1, l.Active())
+	_, ok = s2.Next()
+	require.True(t, ok, "a slot freed in one swarm is usable by another")
+}

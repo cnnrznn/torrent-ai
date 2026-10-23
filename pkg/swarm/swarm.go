@@ -19,6 +19,54 @@ type Config struct {
 	RetryBackoff time.Duration
 	// MaxBackoff caps how long a failing address is skipped.
 	MaxBackoff time.Duration
+	// Limiter, if set, is a connection cap shared with other swarms, on
+	// top of this swarm's MaxPeers. A process serving many torrents
+	// uses one Limiter for all of them.
+	Limiter *Limiter
+}
+
+// Limiter caps connections across several swarms. It is safe for
+// concurrent use.
+type Limiter struct {
+	mu     sync.Mutex
+	max    int
+	active int
+}
+
+// NewLimiter returns a Limiter allowing max connections in total.
+func NewLimiter(max int) *Limiter {
+	return &Limiter{max: max}
+}
+
+func (l *Limiter) tryAcquire() bool {
+	if l == nil {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.active >= l.max {
+		return false
+	}
+	l.active++
+	return true
+}
+
+func (l *Limiter) release() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.active > 0 {
+		l.active--
+	}
+}
+
+// Active returns the number of connections held across all swarms.
+func (l *Limiter) Active() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.active
 }
 
 // DefaultConfig returns the default swarm settings.
@@ -111,6 +159,9 @@ func (s *Swarm) Next() (netip.AddrPort, bool) {
 		if e.active || now.Before(e.retryAt) || s.banned[a.Addr()] {
 			continue
 		}
+		if !s.cfg.Limiter.tryAcquire() {
+			return netip.AddrPort{}, false
+		}
 		e.active = true
 		s.active++
 		return a, true
@@ -135,7 +186,7 @@ func (s *Swarm) Acquire(a netip.AddrPort) bool {
 		e = &entry{}
 		s.addrs[a] = e
 	}
-	if e.active {
+	if e.active || !s.cfg.Limiter.tryAcquire() {
 		return false
 	}
 	e.active = true
@@ -157,6 +208,7 @@ func (s *Swarm) Release(a netip.AddrPort, failed bool) {
 	}
 	e.active = false
 	s.active--
+	s.cfg.Limiter.release()
 
 	if failed {
 		e.failures++
