@@ -224,6 +224,7 @@ func (s *Session) Run(ctx context.Context) error {
 		for p := range s.peers {
 			p.conn.Close()
 			s.swarm.Release(p.addr, false)
+			s.logPeerClosed(p, errSessionStopped)
 		}
 	}()
 
@@ -400,11 +401,19 @@ func (s *Session) removePeer(p *peer) {
 	}
 	s.picker.peerLeft(p.have)
 	s.swarm.Release(p.addr, true)
+	s.logPeerClosed(p, p.conn.Err())
+}
+
+var errSessionStopped = errors.New("session stopped")
+
+// logPeerClosed records a peer's whole connection: why it ended, how
+// long it lasted and what was transferred.
+func (s *Session) logPeerClosed(p *peer, reason error) {
 	s.log.Debug("peer closed",
 		"addr", p.addr,
 		"incoming", p.incoming,
 		"client", p.client,
-		"err", p.conn.Err(),
+		"err", reason,
 		"connected", time.Since(p.connectedAt).Round(time.Millisecond),
 		"down", p.downloaded,
 		"up", p.uploaded,
