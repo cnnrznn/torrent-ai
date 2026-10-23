@@ -53,6 +53,13 @@ type Config struct {
 	// TrackerLoop tunes the re-announce schedule.
 	TrackerLoop peersource.TrackerLoopConfig
 
+	// SeedRatio stops seeding a torrent once it has uploaded this many
+	// times its size; 0 means no limit.
+	SeedRatio float64
+	// SeedTime stops seeding a torrent this long after it completed;
+	// 0 means no limit.
+	SeedTime time.Duration
+
 	// MaxPeers caps peer connections across all torrents; 0 means no
 	// shared cap. Swarm.MaxPeers still caps each torrent.
 	MaxPeers int
@@ -87,6 +94,9 @@ type Source struct {
 
 	// restoredInfo is a magnet's cached info dict, set by Restore.
 	restoredInfo string
+	// finished marks a torrent restored after its seeding limit; it
+	// isn't started again.
+	finished bool
 }
 
 // State is where a torrent is in its life.
@@ -97,6 +107,7 @@ const (
 	StateVerifying   State = "verifying"   // checking data already on disk
 	StateDownloading State = "downloading" // downloading pieces
 	StateSeeding     State = "seeding"     // complete, serving others
+	StateFinished    State = "finished"    // complete, seeding limit reached
 	StateFailed      State = "failed"      // stopped by an error; see Status.Error
 	StateStopped     State = "stopped"     // removed or shut down
 )
@@ -157,11 +168,12 @@ type entry struct {
 	log      *slog.Logger  // fixed at Add; carries the infohash
 	complete chan struct{} // closed when every piece is verified
 
-	mu      sync.Mutex
-	state   State
-	err     error
-	meta    *metainfo.Metainfo
-	session *torrent.Session
+	mu               sync.Mutex
+	state            State
+	seedLimitReached bool
+	err              error
+	meta             *metainfo.Metainfo
+	session          *torrent.Session
 }
 
 // New returns a Manager. Torrents can be added before Run is called;
@@ -288,7 +300,7 @@ func (m *Manager) Restore() (int, error) {
 // sourceFromRecord rebuilds a Source, swapping a magnet link for its
 // cached info dict when there is one.
 func (m *Manager) sourceFromRecord(r Record) (Source, error) {
-	src := Source{Magnet: r.Magnet, Torrent: r.Torrent, Dir: r.Dir, Trackers: r.Trackers}
+	src := Source{Magnet: r.Magnet, Torrent: r.Torrent, Dir: r.Dir, Trackers: r.Trackers, finished: r.Finished}
 	for _, p := range r.Peers {
 		a, err := netip.ParseAddrPort(p)
 		if err != nil {
@@ -398,6 +410,14 @@ func (m *Manager) add(src Source, addedAt time.Time, persist bool) (id.Hash, err
 		}
 	}
 
+	if src.finished {
+		e.state = StateFinished
+		cancel()
+		close(e.done)
+		e.log.Info("torrent restored as finished", "dir", src.Dir)
+		return infoHash, nil
+	}
+
 	e.log.Info("torrent added", "dir", src.Dir, "magnet", mag != nil, "trackers", len(trackers), "direct_peers", len(src.Peers))
 	m.wg.Add(1)
 	go func() {
@@ -493,12 +513,76 @@ func (m *Manager) runTorrent(ctx context.Context, e *entry, trackers []string) {
 			e.mu.Unlock()
 			close(e.complete)
 			log.Info("torrent complete, seeding")
+			m.enforceSeedLimits(ctx, e, sess, log)
 		case <-ctx.Done():
 		}
 	}()
 
 	err = sess.Run(ctx)
 	e.finish(ctx, log, err)
+}
+
+// enforceSeedLimits stops a complete torrent once it reaches the seed
+// ratio or seed time, marks it finished and saves that, so it isn't
+// seeded again after a restart. It returns when ctx ends.
+func (m *Manager) enforceSeedLimits(ctx context.Context, e *entry, sess *torrent.Session, log *slog.Logger) {
+	if m.cfg.SeedRatio <= 0 && m.cfg.SeedTime <= 0 {
+		return
+	}
+	completedAt := time.Now()
+	check := min(10*time.Second, max(m.cfg.SeedTime/4, 10*time.Millisecond))
+	ticker := time.NewTicker(check)
+	defer ticker.Stop()
+
+	size := float64(e.meta.Length())
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		st := sess.Stats()
+		ratio := float64(st.Uploaded) / max(size, 1)
+		var reason string
+		switch {
+		case m.cfg.SeedRatio > 0 && ratio >= m.cfg.SeedRatio:
+			reason = "ratio"
+		case m.cfg.SeedTime > 0 && time.Since(completedAt) >= m.cfg.SeedTime:
+			reason = "time"
+		default:
+			continue
+		}
+
+		log.Info("seeding limit reached", "reason", reason, "ratio", ratio, "seeded_for", time.Since(completedAt).Round(time.Second))
+		e.mu.Lock()
+		e.seedLimitReached = true
+		e.mu.Unlock()
+		if st := m.cfg.Store; st != nil {
+			if r, ok := m.record(e); ok {
+				r.Finished = true
+				if err := st.Save(r); err != nil {
+					log.Warn("saving finished state failed", "err", err)
+				}
+			}
+		}
+		e.cancel()
+		return
+	}
+}
+
+// record rebuilds a torrent's Store record.
+func (m *Manager) record(e *entry) (Record, bool) {
+	records, err := m.cfg.Store.Records()
+	if err != nil {
+		return Record{}, false
+	}
+	for _, r := range records {
+		if r.InfoHash == e.infoHash.Hex() {
+			return r, true
+		}
+	}
+	return Record{}, false
 }
 
 // progress reports the torrent to its trackers. Before the metadata is
@@ -519,6 +603,10 @@ func (e *entry) progress() peersource.Progress {
 func (e *entry) finish(ctx context.Context, log *slog.Logger, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.seedLimitReached {
+		e.state = StateFinished
+		return
+	}
 	if ctx.Err() != nil {
 		e.state = StateStopped
 		return

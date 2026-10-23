@@ -133,3 +133,43 @@ func TestStoreDHT(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, want, got)
 }
+
+func TestSeedLimits(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a := makeTorrent(t, "a.bin", 30_000, 16*1024, 13)
+	dir, stateDir := t.TempDir(), t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.bin"), a.data, 0o644))
+
+	start := func(seedTime time.Duration) *Manager {
+		store, err := OpenStore(stateDir)
+		require.NoError(t, err)
+		m := New(Config{Store: store, SeedTime: seedTime})
+		ctx, stop := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { m.Run(ctx); close(done) }()
+		t.Cleanup(func() { stop(); <-done })
+		return m
+	}
+
+	m := start(150 * time.Millisecond)
+	_, err := m.Add(Source{Torrent: a.file, Dir: dir})
+	require.NoError(t, err)
+	waitState(t, m, a, StateSeeding)
+	waitState(t, m, a, StateFinished)
+
+	store, _ := OpenStore(stateDir)
+	records, err := store.Records()
+	require.NoError(t, err)
+	require.True(t, records[0].Finished)
+
+	// A restart keeps it finished rather than seeding it again.
+	m2 := start(0)
+	_, err = m2.Restore()
+	require.NoError(t, err)
+	st, err := m2.Status(a.meta.InfoHash())
+	require.NoError(t, err)
+	require.Equal(t, StateFinished, st.State)
+	require.NoError(t, m2.Remove(a.meta.InfoHash(), false))
+}

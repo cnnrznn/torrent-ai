@@ -24,6 +24,8 @@ type Record struct {
 	Peers    []string  `json:"peers,omitempty"`
 	Trackers []string  `json:"trackers,omitempty"`
 	AddedAt  time.Time `json:"added_at"`
+	// Finished is set once the torrent reached its seeding limit.
+	Finished bool `json:"finished,omitempty"`
 }
 
 // Store keeps the daemon's state in a directory:

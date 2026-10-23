@@ -45,6 +45,9 @@ type config struct {
 	dhtStatsInterval time.Duration
 	dhtSaveInterval  time.Duration
 
+	seedRatio float64
+	seedTime  time.Duration
+
 	profiling profiling
 	otel      otelConfig
 	daemon    daemonConfig
@@ -97,6 +100,8 @@ func registerFlags(r *registry, cfg *config) {
 	r.str(&cfg.dir, "o", "directory to download into")
 	r.integer(&cfg.port, "port", 0, "TCP port for peers and UDP port for the DHT; 0 picks a free one", "")
 	r.boolean(&cfg.seed, "seed", "keep seeding after the download completes")
+	r.float(&cfg.seedRatio, "seed-ratio", 0, "serve: stop seeding a torrent after uploading this many times its size; 0 means no limit", "")
+	r.duration(&cfg.seedTime, "seed-time", 0, "serve: stop seeding a torrent this long after it completes; 0 means no limit", "")
 	r.duration(&cfg.timeout, "timeout", 0, "give up after this long, exiting with code 3; 0 means no limit", "")
 	r.duration(&cfg.statusInterval, "status-interval", time.Millisecond, "how often the status line is logged", "")
 

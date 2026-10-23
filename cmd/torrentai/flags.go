@@ -78,6 +78,17 @@ func (r *registry) integer(p *int, name string, minimum int, usage, spec string)
 	})
 }
 
+// float registers a float flag that must be at least minimum.
+func (r *registry) float(p *float64, name string, minimum float64, usage, spec string) {
+	r.add((*floatValue)(p), name, "float", usage, spec)
+	r.checks = append(r.checks, func() error {
+		if *p < minimum {
+			return fmt.Errorf("-%s must be at least %g, got %g", name, minimum, *p)
+		}
+		return nil
+	})
+}
+
 // duration registers a duration flag that must be at least minimum.
 func (r *registry) duration(p *time.Duration, name string, minimum time.Duration, usage, spec string) {
 	r.add((*durationValue)(p), name, "duration", usage, spec)
@@ -265,6 +276,15 @@ func (v *intValue) Set(s string) error {
 	return err
 }
 func (v *intValue) String() string { return strconv.Itoa(int(*v)) }
+
+type floatValue float64
+
+func (v *floatValue) Set(s string) error {
+	f, err := strconv.ParseFloat(s, 64)
+	*v = floatValue(f)
+	return err
+}
+func (v *floatValue) String() string { return strconv.FormatFloat(float64(*v), 'g', -1, 64) }
 
 type durationValue time.Duration
 
