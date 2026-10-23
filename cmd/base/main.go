@@ -257,26 +257,45 @@ func announce(ctx context.Context, log *slog.Logger, sw *swarm.Swarm, url string
 }
 
 // dhtPeers joins the DHT and repeatedly looks up and announces the
-// torrent, feeding the peers it finds into the swarm.
+// torrent, feeding the peers it finds into the swarm. It logs a stats
+// line every minute so DHT health is visible without debug logs.
 func dhtPeers(ctx context.Context, log *slog.Logger, node *dht.Server, sw *swarm.Swarm, infoHash id.Hash, port int) {
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				logDHTStats(log, node.Stats())
+			}
+		}
+	}()
+
 	for {
 		if node.Nodes() == 0 {
-			if err := node.Bootstrap(ctx, dht.DefaultRouters); err != nil {
-				log.Warn("dht bootstrap failed", "err", err)
+			st, err := node.Bootstrap(ctx, dht.DefaultRouters)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Warn("dht bootstrap failed", "err", err, "lookup", st)
 			} else {
-				log.Info("joined dht", "nodes", node.Nodes())
+				log.Info("dht bootstrapped", "nodes", node.Nodes(), "lookup", st)
 			}
 		}
 
-		found := 0
-		err := node.Announce(ctx, infoHash, port, func(peers []netip.AddrPort) {
-			found += len(peers)
+		st, err := node.Announce(ctx, infoHash, port, func(peers []netip.AddrPort) {
 			sw.Add(peers...)
 		})
-		if err != nil && ctx.Err() == nil {
-			log.Warn("dht lookup failed", "err", err)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Warn("dht lookup failed", "err", err, "lookup", st)
 		} else {
-			log.Info("dht lookup done", "peers", found, "nodes", node.Nodes())
+			log.Info("dht lookup done", "infohash", infoHash.Hex(), "nodes", node.Nodes(), "lookup", st)
 		}
 
 		select {
@@ -285,4 +304,19 @@ func dhtPeers(ctx context.Context, log *slog.Logger, node *dht.Server, sw *swarm
 		case <-time.After(dhtInterval):
 		}
 	}
+}
+
+func logDHTStats(log *slog.Logger, st dht.Stats) {
+	log.Info("dht stats",
+		"nodes", st.Nodes,
+		"buckets", st.Buckets,
+		"stored_peers", st.StoredPeers,
+		"sent", st.QueriesSent,
+		"replies", st.Replies,
+		"error_replies", st.ErrorReplies,
+		"timeouts", st.Timeouts,
+		"received", st.QueriesReceived,
+		"announced_to_us", st.Announced,
+		"bad_packets", st.BadPackets,
+	)
 }

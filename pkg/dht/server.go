@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cnnrznn/torrent-scratch/pkg/bencoding"
@@ -55,6 +56,58 @@ type Server struct {
 
 	peersMu sync.Mutex
 	peers   map[id.Hash]map[netip.AddrPort]time.Time
+
+	stats counters
+}
+
+type counters struct {
+	sent, replies, errorReplies, timeouts atomic.Int64
+	received, badPackets, announced       atomic.Int64
+}
+
+// Stats is a snapshot of a server's activity since it started.
+type Stats struct {
+	// Nodes and Buckets describe the routing table.
+	Nodes   int
+	Buckets int
+	// StoredPeers is how many peers other nodes have announced to us.
+	StoredPeers int
+
+	QueriesSent  int64 // queries we sent
+	Replies      int64 // responses to our queries
+	ErrorReplies int64 // KRPC errors in reply to our queries
+	Timeouts     int64 // our queries that went unanswered
+
+	QueriesReceived int64 // queries other nodes sent us
+	Announced       int64 // announce_peer queries we accepted
+	BadPackets      int64 // packets we couldn't decode
+}
+
+// Stats returns a snapshot of the server's activity.
+func (s *Server) Stats() Stats {
+	s.table.mu.Lock()
+	buckets := len(s.table.buckets)
+	s.table.mu.Unlock()
+
+	s.peersMu.Lock()
+	stored := 0
+	for _, set := range s.peers {
+		stored += len(set)
+	}
+	s.peersMu.Unlock()
+
+	return Stats{
+		Nodes:           s.table.len(),
+		Buckets:         buckets,
+		StoredPeers:     stored,
+		QueriesSent:     s.stats.sent.Load(),
+		Replies:         s.stats.replies.Load(),
+		ErrorReplies:    s.stats.errorReplies.Load(),
+		Timeouts:        s.stats.timeouts.Load(),
+		QueriesReceived: s.stats.received.Load(),
+		Announced:       s.stats.announced.Load(),
+		BadPackets:      s.stats.badPackets.Load(),
+	}
 }
 
 type pendingQuery struct {
@@ -134,7 +187,8 @@ func (s *Server) Run(ctx context.Context) error {
 
 		m, err := decodeMsg(buf[:n])
 		if err != nil {
-			s.log.Debug("bad packet", "from", from, "err", err)
+			s.stats.badPackets.Add(1)
+			s.log.Debug("dht bad packet", "from", from, "len", n, "err", err)
 			continue
 		}
 
@@ -204,6 +258,8 @@ func (s *Server) query(ctx context.Context, addr netip.AddrPort, method string, 
 		s.mu.Unlock()
 	}()
 
+	start := time.Now()
+	s.stats.sent.Add(1)
 	s.send(encodeQuery(tx, method, args), addr)
 
 	timer := time.NewTimer(s.timeout)
@@ -213,18 +269,26 @@ func (s *Server) query(ctx context.Context, addr netip.AddrPort, method string, 
 	select {
 	case m = <-p.ch:
 	case <-timer.C:
+		s.stats.timeouts.Add(1)
+		s.log.Debug("dht query", "method", method, "to", addr, "result", "timeout", "dur", time.Since(start))
 		return nil, id.Hash{}, fmt.Errorf("%s to %s timed out", method, addr)
 	case <-ctx.Done():
 		return nil, id.Hash{}, ctx.Err()
 	}
 
 	if m.Y == "e" {
+		s.stats.errorReplies.Add(1)
+		s.log.Debug("dht query", "method", method, "to", addr, "result", "error", "code", m.ErrCode, "msg", m.ErrMsg, "dur", time.Since(start))
 		return nil, id.Hash{}, fmt.Errorf("%s to %s: error %d: %s", method, addr, m.ErrCode, m.ErrMsg)
 	}
 	nodeID, ok := getID(m.R, "id")
 	if !ok {
+		s.stats.errorReplies.Add(1)
+		s.log.Debug("dht query", "method", method, "to", addr, "result", "error", "msg", "reply has no node ID", "dur", time.Since(start))
 		return nil, id.Hash{}, fmt.Errorf("%s to %s: reply has no node ID", method, addr)
 	}
+	s.stats.replies.Add(1)
+	s.log.Debug("dht query", "method", method, "to", addr, "result", "ok", "dur", time.Since(start))
 	s.table.insert(node{ID: nodeID, Addr: addr})
 
 	return m.R, nodeID, nil
@@ -307,6 +371,9 @@ func (s *Server) announcePeer(ctx context.Context, n node, infoHash id.Hash, por
 }
 
 func (s *Server) handleQuery(m msg, from netip.AddrPort) {
+	s.stats.received.Add(1)
+	s.log.Debug("dht query received", "method", m.Q, "from", from)
+
 	sender, ok := getID(m.A, "id")
 	if !ok {
 		s.send(encodeError(m.T, errProtocol, "missing id"), from)
@@ -363,6 +430,8 @@ func (s *Server) handleQuery(m msg, from netip.AddrPort) {
 			return
 		}
 		s.storePeer(infoHash, netip.AddrPortFrom(from.Addr(), uint16(port)))
+		s.stats.announced.Add(1)
+		s.log.Debug("dht peer announced", "infohash", infoHash.Hex(), "peer", netip.AddrPortFrom(from.Addr(), uint16(port)))
 
 	default:
 		s.send(encodeError(m.T, errMethod, "Method Unknown"), from)

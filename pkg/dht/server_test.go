@@ -99,6 +99,7 @@ func TestServer(t *testing.T) {
 			require.ErrorContains(t, err, "timed out")
 		}
 		require.NotContains(t, ids(a.table.closest(n.ID, 100)), n.ID)
+		require.GreaterOrEqual(t, a.Stats().Timeouts, int64(maxFailures))
 	})
 }
 

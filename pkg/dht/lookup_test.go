@@ -20,7 +20,8 @@ func startNetwork(t *testing.T, ctx context.Context, n int) []*Server {
 	router := []string{nodes[0].Addr().String()}
 	for range n - 1 {
 		s := startServer(t, ctx)
-		require.NoError(t, s.Bootstrap(ctx, router))
+		_, err := s.Bootstrap(ctx, router)
+		require.NoError(t, err)
 		nodes = append(nodes, s)
 	}
 	return nodes
@@ -40,7 +41,7 @@ func TestLookup(t *testing.T) {
 
 	t.Run("find_node lookup converges on the closest nodes", func(t *testing.T) {
 		target := id.Random()
-		got, err := nodes[7].lookup(ctx, target, false, nil, nil, alpha)
+		got, st, err := nodes[7].lookup(ctx, target, false, nil, nil, alpha)
 		require.NoError(t, err)
 
 		var all []node
@@ -51,15 +52,19 @@ func TestLookup(t *testing.T) {
 		}
 		sortByDistance(all, target)
 		require.Equal(t, ids(all[:K]), ids(candidateNodes(got)))
+		require.GreaterOrEqual(t, st.Responded, K)
+		require.Equal(t, commonPrefixLen(all[0].ID, target), st.ClosestBits)
 	})
 
 	t.Run("a peer announced on one node is found from another", func(t *testing.T) {
 		infoHash := id.Random()
-		require.NoError(t, nodes[5].Announce(ctx, infoHash, 7000, nil))
+		st, err := nodes[5].Announce(ctx, infoHash, 7000, nil)
+		require.NoError(t, err)
+		require.Equal(t, K, st.Announced)
 
 		var mu sync.Mutex
 		found := map[netip.AddrPort]bool{}
-		err := nodes[20].GetPeers(ctx, infoHash, func(peers []netip.AddrPort) {
+		st, err = nodes[20].GetPeers(ctx, infoHash, func(peers []netip.AddrPort) {
 			mu.Lock()
 			defer mu.Unlock()
 			for _, p := range peers {
@@ -68,11 +73,20 @@ func TestLookup(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.True(t, found[netip.AddrPortFrom(nodes[5].Addr().Addr(), 7000)], "found %v", found)
+		require.Equal(t, 1, st.Peers)
 	})
 
 	t.Run("lookup with an empty table fails", func(t *testing.T) {
 		lonely := startServer(t, ctx)
-		require.ErrorIs(t, lonely.GetPeers(ctx, id.Random(), nil), errNoNodes)
+		_, err := lonely.GetPeers(ctx, id.Random(), nil)
+		require.ErrorIs(t, err, errNoNodes)
+	})
+
+	t.Run("stats count traffic", func(t *testing.T) {
+		st := nodes[0].Stats()
+		require.Equal(t, nodes[0].Nodes(), st.Nodes)
+		require.Positive(t, st.QueriesReceived)
+		require.Positive(t, st.Buckets)
 	})
 
 	t.Run("AddNode adds a node that answers", func(t *testing.T) {

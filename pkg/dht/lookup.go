@@ -3,9 +3,11 @@ package dht
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cnnrznn/torrent-scratch/pkg/id"
@@ -30,9 +32,38 @@ var errNoNodes = errors.New("routing table is empty")
 
 type candidate struct {
 	node
-	queried bool
-	failed  bool
-	token   string
+	queried   bool
+	responded bool
+	failed    bool
+	token     string
+}
+
+// LookupStats summarizes one lookup.
+type LookupStats struct {
+	Queried   int // nodes queried
+	Responded int // nodes that answered
+	Failed    int // nodes that timed out or returned an error
+	Peers     int // distinct peers found
+	Announced int // nodes that accepted our announce_peer
+	// ClosestBits is how many leading bits the closest responding node
+	// shares with the target. On the live DHT a converged lookup gets
+	// around 20 or more; a small value means the lookup stalled far
+	// from the target.
+	ClosestBits int
+	Duration    time.Duration
+}
+
+// LogValue lets a LookupStats be logged as a group.
+func (st LookupStats) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.Int("queried", st.Queried),
+		slog.Int("responded", st.Responded),
+		slog.Int("failed", st.Failed),
+		slog.Int("peers", st.Peers),
+		slog.Int("announced", st.Announced),
+		slog.Int("closest_bits", st.ClosestBits),
+		slog.Duration("dur", st.Duration),
+	)
 }
 
 type lookupResult struct {
@@ -48,7 +79,11 @@ type lookupResult struct {
 // queried. With getPeers it sends get_peers and streams any peers found
 // to found; otherwise it sends find_node. It returns the closest nodes
 // that answered, nearest first.
-func (s *Server) lookup(ctx context.Context, target id.Hash, getPeers bool, found func([]netip.AddrPort), seeds []node, parallel int) ([]*candidate, error) {
+func (s *Server) lookup(ctx context.Context, target id.Hash, getPeers bool, found func([]netip.AddrPort), seeds []node, parallel int) ([]*candidate, LookupStats, error) {
+	start := time.Now()
+	var st LookupStats
+	seen := map[netip.AddrPort]bool{}
+
 	cands := map[id.Hash]*candidate{}
 	add := func(n node) {
 		if n.ID == s.id {
@@ -65,7 +100,7 @@ func (s *Server) lookup(ctx context.Context, target id.Hash, getPeers bool, foun
 		add(n)
 	}
 	if len(cands) == 0 {
-		return nil, errNoNodes
+		return nil, st, errNoNodes
 	}
 
 	closest := func() []*candidate {
@@ -96,6 +131,7 @@ func (s *Server) lookup(ctx context.Context, target id.Hash, getPeers bool, foun
 			}
 			c.queried = true
 			inflight++
+			st.Queried++
 			go func() {
 				r := lookupResult{c: c}
 				if getPeers {
@@ -120,29 +156,48 @@ func (s *Server) lookup(ctx context.Context, target id.Hash, getPeers bool, foun
 		select {
 		case r = <-results:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			st.Duration = time.Since(start)
+			return nil, st, ctx.Err()
 		}
 		inflight--
 
 		if r.err != nil {
 			r.c.failed = true
+			st.Failed++
 			continue
 		}
+		r.c.responded = true
+		st.Responded++
 		r.c.token = r.token
 		for _, n := range r.nodes {
 			add(n)
+		}
+		for _, p := range r.peers {
+			if !seen[p] {
+				seen[p] = true
+				st.Peers++
+			}
 		}
 		if len(r.peers) > 0 && found != nil {
 			found(r.peers)
 		}
 	}
 
-	return closest(), nil
+	result := closest()
+	for _, c := range result {
+		if c.responded {
+			st.ClosestBits = commonPrefixLen(c.ID, target)
+			break
+		}
+	}
+	st.Duration = time.Since(start)
+	s.log.Debug("dht lookup done", "target", target.Hex(), "get_peers", getPeers, "stats", st)
+	return result, st, nil
 }
 
 // Bootstrap joins the DHT through the given router addresses
 // ("host:port"), then looks up our own ID to fill the routing table.
-func (s *Server) Bootstrap(ctx context.Context, routers []string) error {
+func (s *Server) Bootstrap(ctx context.Context, routers []string) (LookupStats, error) {
 	var mu sync.Mutex
 	var seeds []node
 	var wg sync.WaitGroup
@@ -151,17 +206,19 @@ func (s *Server) Bootstrap(ctx context.Context, routers []string) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			start := time.Now()
 			addr, err := net.ResolveUDPAddr("udp4", r)
 			if err != nil {
-				s.log.Debug("resolve router failed", "router", r, "err", err)
+				s.log.Warn("dht router", "router", r, "result", "resolve failed", "err", err)
 				return
 			}
 			ap := netip.AddrPortFrom(addr.AddrPort().Addr().Unmap(), addr.AddrPort().Port())
 			nodes, err := s.findNode(ctx, ap, s.id)
 			if err != nil {
-				s.log.Debug("router failed", "router", r, "err", err)
+				s.log.Warn("dht router", "router", r, "addr", ap, "result", "failed", "err", err, "dur", time.Since(start))
 				return
 			}
+			s.log.Debug("dht router", "router", r, "addr", ap, "result", "ok", "nodes", len(nodes), "dur", time.Since(start))
 			mu.Lock()
 			seeds = append(seeds, nodes...)
 			mu.Unlock()
@@ -169,32 +226,34 @@ func (s *Server) Bootstrap(ctx context.Context, routers []string) error {
 	}
 	wg.Wait()
 
-	if _, err := s.lookup(ctx, s.id, false, nil, seeds, bootstrapAlpha); err != nil {
-		return err
+	_, st, err := s.lookup(ctx, s.id, false, nil, seeds, bootstrapAlpha)
+	if err != nil {
+		return st, err
 	}
 	if s.table.len() == 0 {
-		return errNoNodes
+		return st, errNoNodes
 	}
-	s.log.Debug("bootstrapped", "nodes", s.table.len())
-	return nil
+	return st, nil
 }
 
 // GetPeers looks up peers for infoHash, calling found with each batch
 // as it arrives.
-func (s *Server) GetPeers(ctx context.Context, infoHash id.Hash, found func([]netip.AddrPort)) error {
-	_, err := s.lookup(ctx, infoHash, true, found, nil, alpha)
-	return err
+func (s *Server) GetPeers(ctx context.Context, infoHash id.Hash, found func([]netip.AddrPort)) (LookupStats, error) {
+	_, st, err := s.lookup(ctx, infoHash, true, found, nil, alpha)
+	return st, err
 }
 
 // Announce looks up peers for infoHash like GetPeers, then announces
 // that we accept peer connections on port to the closest nodes that
 // gave us a token.
-func (s *Server) Announce(ctx context.Context, infoHash id.Hash, port int, found func([]netip.AddrPort)) error {
-	closest, err := s.lookup(ctx, infoHash, true, found, nil, alpha)
+func (s *Server) Announce(ctx context.Context, infoHash id.Hash, port int, found func([]netip.AddrPort)) (LookupStats, error) {
+	start := time.Now()
+	closest, st, err := s.lookup(ctx, infoHash, true, found, nil, alpha)
 	if err != nil {
-		return err
+		return st, err
 	}
 
+	var announced atomic.Int64
 	var wg sync.WaitGroup
 	for _, c := range closest {
 		if c.token == "" {
@@ -204,12 +263,16 @@ func (s *Server) Announce(ctx context.Context, infoHash id.Hash, port int, found
 		go func() {
 			defer wg.Done()
 			if err := s.announcePeer(ctx, c.node, infoHash, port, c.token); err != nil {
-				s.log.Debug("announce_peer failed", "addr", c.Addr, "err", err)
+				return
 			}
+			announced.Add(1)
 		}()
 	}
 	wg.Wait()
-	return nil
+
+	st.Announced = int(announced.Load())
+	st.Duration = time.Since(start)
+	return st, nil
 }
 
 // AddNode pings addr in the background and adds it to the routing
@@ -219,6 +282,11 @@ func (s *Server) AddNode(addr netip.AddrPort) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*s.timeout+time.Second)
 		defer cancel()
-		s.Ping(ctx, addr)
+		nodeID, err := s.Ping(ctx, addr)
+		if err != nil {
+			s.log.Debug("dht add node", "addr", addr, "result", "failed", "err", err)
+			return
+		}
+		s.log.Debug("dht add node", "addr", addr, "result", "ok", "id", nodeID.Hex(), "nodes", s.table.len())
 	}()
 }
