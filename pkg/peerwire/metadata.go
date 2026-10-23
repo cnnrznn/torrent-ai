@@ -18,12 +18,48 @@ const (
 	// sending us ut_metadata messages.
 	UTMetadataID = 1
 
+	// MetadataPieceSize is the spec-defined size of metadata pieces
+	// (BEP 9: 16 KiB, except the last).
 	MetadataPieceSize = 16 * 1024
-	// MaxMetadataSize bounds the info dict we'll accept from a peer.
+	// MaxMetadataSize is the default bound on the info dict we'll
+	// accept from a peer.
 	MaxMetadataSize = 16 << 20
-
-	metadataWindow = 16
 )
+
+// MetadataOptions tunes metadata exchange. Zero fields take the
+// defaults in DefaultMetadataOptions.
+type MetadataOptions struct {
+	// PieceSize is the size of metadata pieces. Peers assume 16 KiB
+	// (BEP 9); other values only work between peers that agree.
+	PieceSize int
+	// MaxSize is the largest info dict we'll accept.
+	MaxSize int
+	// Window is how many piece requests are kept in flight.
+	Window int
+}
+
+// DefaultMetadataOptions returns the default metadata settings.
+func DefaultMetadataOptions() MetadataOptions {
+	return MetadataOptions{
+		PieceSize: MetadataPieceSize,
+		MaxSize:   MaxMetadataSize,
+		Window:    16,
+	}
+}
+
+func (o MetadataOptions) withDefaults() MetadataOptions {
+	d := DefaultMetadataOptions()
+	if o.PieceSize <= 0 {
+		o.PieceSize = d.PieceSize
+	}
+	if o.MaxSize <= 0 {
+		o.MaxSize = d.MaxSize
+	}
+	if o.Window <= 0 {
+		o.Window = d.Window
+	}
+	return o
+}
 
 // Reasons FetchMetadata can fail because of the peer.
 var (
@@ -87,7 +123,8 @@ func ParseMetadataMsg(b []byte) (MetadataMsg, error) {
 // FetchMetadata downloads the info dict for infoHash from the peer on
 // c and checks it against the hash. It must be the only reader of c's
 // messages while it runs. It sends our extension handshake itself.
-func FetchMetadata(ctx context.Context, c *Conn, infoHash id.Hash) (string, error) {
+func FetchMetadata(ctx context.Context, c *Conn, infoHash id.Hash, opts MetadataOptions) (string, error) {
+	opts = opts.withDefaults()
 	if !c.Peer.SupportsExtensions() {
 		return "", ErrNoExtensions
 	}
@@ -106,10 +143,10 @@ func FetchMetadata(ctx context.Context, c *Conn, infoHash id.Hash) (string, erro
 		next     int // next piece to request
 	)
 
-	numPieces := func() int { return (size + MetadataPieceSize - 1) / MetadataPieceSize }
+	numPieces := func() int { return (size + opts.PieceSize - 1) / opts.PieceSize }
 
 	request := func() error {
-		for ; next < numPieces() && next-received < metadataWindow; next++ {
+		for ; next < numPieces() && next-received < opts.Window; next++ {
 			m := MetadataMsg{Type: MetadataRequest, Piece: next}
 			if err := c.Send(MsgExtended(byte(peerID), m.Encode())); err != nil {
 				return err
@@ -148,7 +185,7 @@ func FetchMetadata(ctx context.Context, c *Conn, infoHash id.Hash) (string, erro
 			if peerID == 0 {
 				return "", ErrNoUTMetadata
 			}
-			if h.MetadataSize <= 0 || h.MetadataSize > MaxMetadataSize {
+			if h.MetadataSize <= 0 || h.MetadataSize > opts.MaxSize {
 				return "", fmt.Errorf("peer reported metadata size %d", h.MetadataSize)
 			}
 			size = h.MetadataSize
@@ -174,8 +211,8 @@ func FetchMetadata(ctx context.Context, c *Conn, infoHash id.Hash) (string, erro
 			if m.Piece < 0 || m.Piece >= len(got) || m.TotalSize != size {
 				return "", fmt.Errorf("unexpected metadata piece %d (total size %d)", m.Piece, m.TotalSize)
 			}
-			begin := m.Piece * MetadataPieceSize
-			if want := min(MetadataPieceSize, size-begin); len(m.Data) != want {
+			begin := m.Piece * opts.PieceSize
+			if want := min(opts.PieceSize, size-begin); len(m.Data) != want {
 				return "", fmt.Errorf("metadata piece %d is %d bytes, want %d", m.Piece, len(m.Data), want)
 			}
 			if got[m.Piece] {

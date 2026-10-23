@@ -49,17 +49,17 @@ func TestMessages(t *testing.T) {
 		buf.Write(KeepAlive)
 		buf.Write(Message{ID: Unchoke}.Bytes())
 
-		m, err := ReadMessage(&buf)
+		m, err := ReadMessage(&buf, MaxMessageLen)
 		require.NoError(t, err)
 		index, begin, length, err := m.ParseRequest()
 		require.NoError(t, err)
 		require.Equal(t, []int{1, 2, 3}, []int{index, begin, length})
 
-		m, err = ReadMessage(&buf)
+		m, err = ReadMessage(&buf, MaxMessageLen)
 		require.NoError(t, err)
 		require.Nil(t, m)
 
-		m, err = ReadMessage(&buf)
+		m, err = ReadMessage(&buf, MaxMessageLen)
 		require.NoError(t, err)
 		require.Equal(t, Unchoke, m.ID)
 		require.Empty(t, m.Payload)
@@ -96,7 +96,7 @@ func TestMessages(t *testing.T) {
 	})
 
 	t.Run("rejects oversized messages", func(t *testing.T) {
-		_, err := ReadMessage(bytes.NewReader([]byte{0xff, 0xff, 0xff, 0xff}))
+		_, err := ReadMessage(bytes.NewReader([]byte{0, 0, 1, 0}), 255)
 		require.ErrorContains(t, err, "exceeds limit")
 	})
 }

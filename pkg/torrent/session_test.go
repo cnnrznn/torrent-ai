@@ -154,11 +154,11 @@ func TestSessionServesMetadata(t *testing.T) {
 	writeContent(t, dir, m, data)
 	_, addr := startSession(t, ctx, m, dir)
 
-	c, err := peerwire.Dial(ctx, addr, peerwire.NewHandshake(m.InfoHash(), id.NewPeerID(), false))
+	c, err := peerwire.Dial(ctx, addr, peerwire.NewHandshake(m.InfoHash(), id.NewPeerID(), false), peerwire.Options{})
 	require.NoError(t, err)
 	defer c.Close()
 
-	info, err := peerwire.FetchMetadata(ctx, c, m.InfoHash())
+	info, err := peerwire.FetchMetadata(ctx, c, m.InfoHash(), peerwire.MetadataOptions{})
 	require.NoError(t, err)
 	require.Equal(t, m.RawInfo(), info)
 }
@@ -189,7 +189,7 @@ func TestSessionDHTPort(t *testing.T) {
 	}()
 	defer func() { cancel(); <-done }()
 
-	c, err := peerwire.Dial(ctx, addr, peerwire.NewHandshake(m.InfoHash(), id.NewPeerID(), true))
+	c, err := peerwire.Dial(ctx, addr, peerwire.NewHandshake(m.InfoHash(), id.NewPeerID(), true), peerwire.Options{})
 	require.NoError(t, err)
 	defer c.Close()
 	require.True(t, c.Peer.SupportsDHT())

@@ -281,7 +281,7 @@ func (s *Session) connectPeers(ctx context.Context) {
 		}
 		s.dials.Add(1)
 		go func() {
-			c, err := peerwire.Dial(ctx, addr, s.handshake())
+			c, err := peerwire.Dial(ctx, addr, s.handshake(), peerwire.Options{})
 			if err != nil {
 				s.dialFailures.Add(1)
 				s.log.Debug("peer dial failed", "addr", addr, "err", err)
@@ -312,7 +312,7 @@ func (s *Session) acceptLoop(ctx context.Context, ln net.Listener) {
 			continue
 		}
 		go func() {
-			c, err := peerwire.Accept(nc, s.handshake())
+			c, err := peerwire.Accept(nc, s.handshake(), peerwire.Options{})
 			if err != nil {
 				s.log.Debug("peer accept failed", "addr", addr, "err", err)
 				s.swarm.Release(addr, true)

@@ -91,13 +91,36 @@ func TestFetchMetadata(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return FetchMetadata(ctx, client, infoHash)
+		return FetchMetadata(ctx, client, infoHash, MetadataOptions{})
 	}
 
 	t.Run("downloads and verifies the info dict", func(t *testing.T) {
 		got, err := fetch(t, nil)
 		require.NoError(t, err)
 		require.Equal(t, string(info), got)
+	})
+
+	t.Run("works with a window of one request", func(t *testing.T) {
+		client, server, err := connPair(t, infoHash, infoHash)
+		require.NoError(t, err)
+		defer client.Close()
+		defer server.Close()
+		go serveMetadata(server, info, nil)
+
+		got, err := FetchMetadata(context.Background(), client, infoHash, MetadataOptions{Window: 1})
+		require.NoError(t, err)
+		require.Equal(t, string(info), got)
+	})
+
+	t.Run("refuses metadata over the size limit", func(t *testing.T) {
+		client, server, err := connPair(t, infoHash, infoHash)
+		require.NoError(t, err)
+		defer client.Close()
+		defer server.Close()
+		go serveMetadata(server, info, nil)
+
+		_, err = FetchMetadata(context.Background(), client, infoHash, MetadataOptions{MaxSize: 1000})
+		require.ErrorContains(t, err, "metadata size")
 	})
 
 	t.Run("rejects metadata with the wrong hash", func(t *testing.T) {

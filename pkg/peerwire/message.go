@@ -23,11 +23,14 @@ const (
 	Extended      MessageID = 20
 )
 
-// MaxMessageLen bounds the size of a message we'll read. It fits a
-// 16 KiB block with room to spare, and a bitfield for ~16M pieces.
+// MaxMessageLen is the default bound on the size of a message we'll
+// read. It fits a 16 KiB block with room to spare, and a bitfield for
+// ~16M pieces.
 const MaxMessageLen = 2 << 20
 
-// BlockSize is the size of the blocks we request.
+// BlockSize is the spec-recommended size of the blocks to request
+// (BEP 3: all current implementations use 16 KiB and close
+// connections that request more).
 const BlockSize = 16 * 1024
 
 // Message is a peer wire message, minus its length prefix.
@@ -64,8 +67,9 @@ func (id MessageID) String() string {
 	return fmt.Sprintf("unknown(%d)", byte(id))
 }
 
-// ReadMessage reads one message. It returns nil for a keep-alive.
-func ReadMessage(r io.Reader) (*Message, error) {
+// ReadMessage reads one message of at most maxLen bytes. It returns
+// nil for a keep-alive.
+func ReadMessage(r io.Reader, maxLen int) (*Message, error) {
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
 		return nil, err
@@ -75,7 +79,7 @@ func ReadMessage(r io.Reader) (*Message, error) {
 	if n == 0 {
 		return nil, nil
 	}
-	if n > MaxMessageLen {
+	if int64(n) > int64(maxLen) {
 		return nil, fmt.Errorf("message length %d exceeds limit", n)
 	}
 

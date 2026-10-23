@@ -157,11 +157,11 @@ func fetchMetadataFrom(ctx context.Context, addr netip.AddrPort, infoHash, peerI
 	ctx, cancel := context.WithTimeout(ctx, metadataTimeout)
 	defer cancel()
 
-	c, err := peerwire.Dial(ctx, addr, peerwire.NewHandshake(infoHash, peerID, false))
+	c, err := peerwire.Dial(ctx, addr, peerwire.NewHandshake(infoHash, peerID, false), peerwire.Options{})
 	if err != nil {
 		return "", &dialError{err}
 	}
 	defer c.Close()
 
-	return peerwire.FetchMetadata(ctx, c, infoHash)
+	return peerwire.FetchMetadata(ctx, c, infoHash, peerwire.MetadataOptions{})
 }

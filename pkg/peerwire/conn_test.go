@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -29,12 +30,12 @@ func connPair(t *testing.T, serverHash, clientHash id.Hash) (*Conn, *Conn, error
 			accepted <- result{err: err}
 			return
 		}
-		c, err := Accept(nc, NewHandshake(serverHash, id.NewPeerID(), false))
+		c, err := Accept(nc, NewHandshake(serverHash, id.NewPeerID(), false), Options{})
 		accepted <- result{c, err}
 	}()
 
 	addr := ln.Addr().(*net.TCPAddr).AddrPort()
-	client, err := Dial(context.Background(), addr, NewHandshake(clientHash, id.NewPeerID(), true))
+	client, err := Dial(context.Background(), addr, NewHandshake(clientHash, id.NewPeerID(), true), Options{})
 	server := <-accepted
 	if err != nil {
 		return nil, nil, err
@@ -80,5 +81,43 @@ func TestConn(t *testing.T) {
 	t.Run("rejects a mismatched infohash", func(t *testing.T) {
 		_, _, err := connPair(t, id.Random(), id.Random())
 		require.Error(t, err)
+	})
+}
+
+func TestConnOptions(t *testing.T) {
+	t.Run("zero values take defaults", func(t *testing.T) {
+		require.Equal(t, DefaultOptions(), Options{}.withDefaults())
+		o := Options{SendQueue: 4}.withDefaults()
+		require.Equal(t, 4, o.SendQueue)
+		require.Equal(t, DefaultOptions().ReadTimeout, o.ReadTimeout)
+	})
+
+	t.Run("a silent peer is dropped after the read timeout", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer ln.Close()
+
+		infoHash := id.Random()
+		go func() {
+			nc, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer nc.Close()
+			// Handshake, then go quiet.
+			ReadHandshake(nc)
+			nc.Write(NewHandshake(infoHash, id.NewPeerID(), false).Bytes())
+			time.Sleep(5 * time.Second)
+		}()
+
+		addr := ln.Addr().(*net.TCPAddr).AddrPort()
+		c, err := Dial(context.Background(), addr, NewHandshake(infoHash, id.NewPeerID(), false), Options{ReadTimeout: 100 * time.Millisecond})
+		require.NoError(t, err)
+
+		start := time.Now()
+		for range c.Messages() {
+		}
+		require.Less(t, time.Since(start), 2*time.Second)
+		require.ErrorContains(t, c.Err(), "timeout")
 	})
 }
