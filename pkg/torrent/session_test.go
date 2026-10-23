@@ -44,13 +44,21 @@ func readContent(t *testing.T, dir string, m *metainfo.Metainfo) []byte {
 // address.
 func startSession(t *testing.T, ctx context.Context, m *metainfo.Metainfo, dir string, peers ...netip.AddrPort) (*Session, netip.AddrPort) {
 	t.Helper()
+	return startSessionWith(t, ctx, m, Config{Dir: dir}, peers...)
+}
+
+// startSessionWith is startSession with tuning; cfg.Dir must be set.
+func startSessionWith(t *testing.T, ctx context.Context, m *metainfo.Metainfo, cfg Config, peers ...netip.AddrPort) (*Session, netip.AddrPort) {
+	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
 	sw := swarm.New(swarm.Config{MaxPeers: 10})
 	sw.Add(peers...)
-	s, err := New(m, sw, Config{Dir: dir, PeerID: id.NewPeerID(), Listener: ln})
+	cfg.PeerID = id.NewPeerID()
+	cfg.Listener = ln
+	s, err := New(m, sw, cfg)
 	require.NoError(t, err)
 
 	done := make(chan struct{})
@@ -245,7 +253,38 @@ func TestSessionRecoversFromBadData(t *testing.T) {
 	require.Equal(t, data, readContent(t, dir, m))
 	st := leech.Stats()
 	require.Positive(t, st.HashFailures)
-	require.LessOrEqual(t, st.HashFailures, int64(maxHashFailures))
+	require.LessOrEqual(t, st.HashFailures, int64(DefaultConfig().BanAfter))
 	require.Less(t, st.Downloaded, 3*int64(len(data)), "bad data must not be re-fetched endlessly")
 	require.Equal(t, 1, leech.swarm.Banned())
+}
+
+func TestSessionConfig(t *testing.T) {
+	m, data := makeTorrent(t, 32*1024, 200_000)
+
+	t.Run("zero fields take the defaults", func(t *testing.T) {
+		s, err := New(m, swarm.New(swarm.Config{}), Config{Dir: t.TempDir()})
+		require.NoError(t, err)
+		defer s.storage.Close()
+
+		d := DefaultConfig()
+		require.Equal(t, d.MaxInFlight, s.cfg.MaxInFlight)
+		require.Equal(t, d.RequestTimeout, s.cfg.RequestTimeout)
+		require.Equal(t, d.BlockSize, s.cfg.BlockSize)
+		require.Equal(t, d.BanAfter, s.cfg.BanAfter)
+		require.Equal(t, peerwire.MetadataPieceSize, s.cfg.Metadata.PieceSize)
+	})
+
+	t.Run("downloads with small blocks and one request in flight", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		seedDir := t.TempDir()
+		writeContent(t, seedDir, m, data)
+		_, seedAddr := startSession(t, ctx, m, seedDir)
+
+		dir := t.TempDir()
+		leech, _ := startSessionWith(t, ctx, m, Config{Dir: dir, BlockSize: 4096, MaxInFlight: 1}, seedAddr)
+		waitComplete(t, leech)
+		require.Equal(t, data, readContent(t, dir, m))
+	})
 }

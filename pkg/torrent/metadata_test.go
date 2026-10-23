@@ -39,7 +39,7 @@ func TestFetchMetadata(t *testing.T) {
 		sw.Add(seedAddr)
 	}()
 
-	got, err := FetchMetadata(ctx, sw, m.InfoHash(), id.NewPeerID(), nil)
+	got, err := FetchMetadata(ctx, sw, m.InfoHash(), id.NewPeerID(), MetadataConfig{})
 	require.NoError(t, err)
 	require.Equal(t, m.RawInfo(), got.RawInfo())
 

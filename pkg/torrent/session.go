@@ -18,17 +18,6 @@ import (
 	"github.com/cnnrznn/torrent-ai/pkg/swarm"
 )
 
-const (
-	// maxHashFailures is how many failed pieces a peer may contribute
-	// to before it is banned. A peer that alone sent a failed piece is
-	// banned at once.
-	maxHashFailures = 3
-
-	defaultMaxInFlight = 16
-	requestTimeout     = time.Minute
-	maxRequestLength   = 128 * 1024
-)
-
 // Config configures a Session.
 type Config struct {
 	// Dir is the directory the torrent's files are written under.
@@ -38,9 +27,6 @@ type Config struct {
 	// Listener, if set, accepts incoming peer connections. Run closes
 	// it when it returns.
 	Listener net.Listener
-	// MaxInFlight is the number of block requests kept outstanding per
-	// peer. Defaults to 16.
-	MaxInFlight int
 	// Logger receives debug and progress logs. Defaults to discarding.
 	Logger *slog.Logger
 	// DHTPort, if set, is the UDP port of our DHT node. It is
@@ -49,6 +35,52 @@ type Config struct {
 	// OnPort is called with a peer's DHT node address when it sends a
 	// port message.
 	OnPort func(netip.AddrPort)
+
+	// The fields below tune the session. Zero fields take the defaults
+	// in DefaultConfig.
+
+	// MaxInFlight is the number of block requests kept outstanding per
+	// peer.
+	MaxInFlight int
+	// RequestTimeout is how long a block request may go unanswered
+	// before it is given up and requested elsewhere.
+	RequestTimeout time.Duration
+	// BlockSize is the size of the blocks we request (BEP 3: 16 KiB;
+	// peers commonly disconnect on larger requests).
+	BlockSize int
+	// MaxRequestSize is the largest block request we'll serve.
+	MaxRequestSize int
+	// BanAfter is how many failed pieces a peer may contribute to
+	// before it is banned. A peer that alone sent a failed piece is
+	// banned at once.
+	BanAfter int
+	// Tick is how often the session dials new peers and expires old
+	// requests.
+	Tick time.Duration
+	// Conn tunes peer connections.
+	Conn peerwire.Options
+	// Metadata tunes metadata exchange; PieceSize is used when serving.
+	Metadata peerwire.MetadataOptions
+}
+
+// DefaultConfig returns the default tuning. Connection and metadata
+// options default inside peerwire.
+func DefaultConfig() Config {
+	return Config{
+		MaxInFlight:    16,
+		RequestTimeout: time.Minute,
+		BlockSize:      peerwire.BlockSize,
+		MaxRequestSize: 128 * 1024,
+		BanAfter:       3,
+		Tick:           time.Second,
+	}
+}
+
+// setDefault replaces a zero or negative setting with its default.
+func setDefault[T int | time.Duration](v *T, d T) {
+	if *v <= 0 {
+		*v = d
+	}
 }
 
 // Stats is a snapshot of a session's progress.
@@ -146,9 +178,14 @@ type peerClosed struct {
 // exist are verified, so an interrupted download resumes and a
 // complete one seeds.
 func New(m *metainfo.Metainfo, sw *swarm.Swarm, cfg Config) (*Session, error) {
-	if cfg.MaxInFlight <= 0 {
-		cfg.MaxInFlight = defaultMaxInFlight
-	}
+	d := DefaultConfig()
+	setDefault(&cfg.MaxInFlight, d.MaxInFlight)
+	setDefault(&cfg.RequestTimeout, d.RequestTimeout)
+	setDefault(&cfg.BlockSize, d.BlockSize)
+	setDefault(&cfg.MaxRequestSize, d.MaxRequestSize)
+	setDefault(&cfg.BanAfter, d.BanAfter)
+	setDefault(&cfg.Tick, d.Tick)
+	setDefault(&cfg.Metadata.PieceSize, peerwire.MetadataPieceSize)
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -164,7 +201,7 @@ func New(m *metainfo.Metainfo, sw *swarm.Swarm, cfg Config) (*Session, error) {
 		cfg:      cfg,
 		log:      cfg.Logger,
 		storage:  storage,
-		picker:   newPicker(m, peerwire.NewBitfield(m.NumPieces())),
+		picker:   newPicker(m, peerwire.NewBitfield(m.NumPieces()), cfg.BlockSize),
 		peers:    map[*peer]struct{}{},
 		events:   make(chan event),
 		complete: make(chan struct{}),
@@ -234,7 +271,7 @@ func (s *Session) Run(ctx context.Context) error {
 		go s.acceptLoop(ctx, ln)
 	}
 
-	ticker := time.NewTicker(time.Second)
+	ticker := time.NewTicker(s.cfg.Tick)
 	defer ticker.Stop()
 
 	s.connectPeers(ctx)
@@ -281,7 +318,7 @@ func (s *Session) connectPeers(ctx context.Context) {
 		}
 		s.dials.Add(1)
 		go func() {
-			c, err := peerwire.Dial(ctx, addr, s.handshake(), peerwire.Options{})
+			c, err := peerwire.Dial(ctx, addr, s.handshake(), s.cfg.Conn)
 			if err != nil {
 				s.dialFailures.Add(1)
 				s.log.Debug("peer dial failed", "addr", addr, "err", err)
@@ -312,7 +349,7 @@ func (s *Session) acceptLoop(ctx context.Context, ln net.Listener) {
 			continue
 		}
 		go func() {
-			c, err := peerwire.Accept(nc, s.handshake(), peerwire.Options{})
+			c, err := peerwire.Accept(nc, s.handshake(), s.cfg.Conn)
 			if err != nil {
 				s.log.Debug("peer accept failed", "addr", addr, "err", err)
 				s.swarm.Release(addr, true)
@@ -545,7 +582,8 @@ func (s *Session) handleExtended(p *peer, extID byte, payload []byte) error {
 // dict, or a reject if the piece doesn't exist.
 func (s *Session) serveMetadata(p *peer, piece int) {
 	info := s.m.RawInfo()
-	begin := piece * peerwire.MetadataPieceSize
+	pieceSize := s.cfg.Metadata.PieceSize
+	begin := piece * pieceSize
 
 	res := peerwire.MetadataMsg{Type: peerwire.MetadataReject, Piece: piece}
 	if piece >= 0 && begin < len(info) {
@@ -553,7 +591,7 @@ func (s *Session) serveMetadata(p *peer, piece int) {
 			Type:      peerwire.MetadataData,
 			Piece:     piece,
 			TotalSize: len(info),
-			Data:      []byte(info[begin:min(begin+peerwire.MetadataPieceSize, len(info))]),
+			Data:      []byte(info[begin:min(begin+pieceSize, len(info))]),
 		}
 	}
 	p.conn.Send(peerwire.MsgExtended(byte(p.utMetadata), res.Encode()))
@@ -566,7 +604,7 @@ func (s *Session) serveRequest(p *peer, index, begin, length int) error {
 	if index < 0 || index >= s.m.NumPieces() || !s.picker.have.Has(index) {
 		return nil
 	}
-	if length <= 0 || length > maxRequestLength || begin < 0 || begin+length > s.m.PieceSize(index) {
+	if length <= 0 || length > s.cfg.MaxRequestSize || begin < 0 || begin+length > s.m.PieceSize(index) {
 		return errors.New("invalid request")
 	}
 
@@ -665,7 +703,7 @@ func (s *Session) blame(sources map[netip.AddrPort]bool) {
 			p.hashFails++
 			strikes = p.hashFails
 		}
-		if len(sources) > 1 && strikes < maxHashFailures {
+		if len(sources) > 1 && strikes < s.cfg.BanAfter {
 			continue
 		}
 
@@ -732,7 +770,7 @@ func (s *Session) expireRequests() {
 	for p := range s.peers {
 		expired := 0
 		for b, sentAt := range p.requests {
-			if now.Sub(sentAt) > requestTimeout {
+			if now.Sub(sentAt) > s.cfg.RequestTimeout {
 				delete(p.requests, b)
 				s.picker.released(b)
 				expired++

@@ -24,7 +24,7 @@ func TestPicker(t *testing.T) {
 	t.Run("splits pieces into blocks", func(t *testing.T) {
 		// 3 pieces: two full ones and a short last one.
 		m, _ := makeTorrent(t, pieceLength, 2*pieceLength+100)
-		p := newPicker(m, peerwire.NewBitfield(3))
+		p := newPicker(m, peerwire.NewBitfield(3), peerwire.BlockSize)
 		require.Equal(t, 2, p.numBlocks(0))
 		require.Equal(t, 1, p.numBlocks(2))
 		require.Equal(t, block{2, 0, 100}, p.block(2, 0))
@@ -33,7 +33,7 @@ func TestPicker(t *testing.T) {
 
 	t.Run("prefers the rarest piece", func(t *testing.T) {
 		m, _ := makeTorrent(t, pieceLength, 3*pieceLength)
-		p := newPicker(m, peerwire.NewBitfield(3))
+		p := newPicker(m, peerwire.NewBitfield(3), peerwire.BlockSize)
 		for _, i := range []int{0, 0, 1, 2, 2} {
 			p.peerHas(i)
 		}
@@ -45,7 +45,7 @@ func TestPicker(t *testing.T) {
 
 	t.Run("finishes started pieces first", func(t *testing.T) {
 		m, _ := makeTorrent(t, pieceLength, 3*pieceLength)
-		p := newPicker(m, peerwire.NewBitfield(3))
+		p := newPicker(m, peerwire.NewBitfield(3), peerwire.BlockSize)
 
 		b1, _ := p.next(full(3), never)
 		p.requested(b1)
@@ -57,7 +57,7 @@ func TestPicker(t *testing.T) {
 
 	t.Run("only picks pieces the peer has", func(t *testing.T) {
 		m, _ := makeTorrent(t, pieceLength, 3*pieceLength)
-		p := newPicker(m, peerwire.NewBitfield(3))
+		p := newPicker(m, peerwire.NewBitfield(3), peerwire.BlockSize)
 
 		bf := peerwire.NewBitfield(3)
 		bf.Set(2)
@@ -71,7 +71,7 @@ func TestPicker(t *testing.T) {
 
 	t.Run("duplicates outstanding blocks in endgame", func(t *testing.T) {
 		m, _ := makeTorrent(t, pieceLength, peerwire.BlockSize)
-		p := newPicker(m, peerwire.NewBitfield(1))
+		p := newPicker(m, peerwire.NewBitfield(1), peerwire.BlockSize)
 
 		b, ok := p.next(full(1), never)
 		require.True(t, ok)
@@ -88,7 +88,7 @@ func TestPicker(t *testing.T) {
 
 	t.Run("re-requests released blocks", func(t *testing.T) {
 		m, _ := makeTorrent(t, pieceLength, peerwire.BlockSize)
-		p := newPicker(m, peerwire.NewBitfield(1))
+		p := newPicker(m, peerwire.NewBitfield(1), peerwire.BlockSize)
 
 		b, _ := p.next(full(1), never)
 		p.requested(b)
@@ -101,7 +101,7 @@ func TestPicker(t *testing.T) {
 
 	t.Run("completes and verifies pieces", func(t *testing.T) {
 		m, data := makeTorrent(t, pieceLength, pieceLength)
-		p := newPicker(m, peerwire.NewBitfield(1))
+		p := newPicker(m, peerwire.NewBitfield(1), peerwire.BlockSize)
 
 		b0, _ := p.next(full(1), never)
 		p.requested(b0)
@@ -127,7 +127,7 @@ func TestPicker(t *testing.T) {
 
 	t.Run("downloads a piece again after a failed hash", func(t *testing.T) {
 		m, _ := makeTorrent(t, pieceLength, peerwire.BlockSize)
-		p := newPicker(m, peerwire.NewBitfield(1))
+		p := newPicker(m, peerwire.NewBitfield(1), peerwire.BlockSize)
 
 		b, _ := p.next(full(1), never)
 		p.requested(b)

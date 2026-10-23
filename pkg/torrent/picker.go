@@ -27,31 +27,33 @@ type partialPiece struct {
 //
 // picker is not safe for concurrent use; the session goroutine owns it.
 type picker struct {
-	m       *metainfo.Metainfo
-	have    peerwire.Bitfield
-	avail   []int
-	partial map[int]*partialPiece
+	m         *metainfo.Metainfo
+	blockSize int
+	have      peerwire.Bitfield
+	avail     []int
+	partial   map[int]*partialPiece
 }
 
-func newPicker(m *metainfo.Metainfo, have peerwire.Bitfield) *picker {
+func newPicker(m *metainfo.Metainfo, have peerwire.Bitfield, blockSize int) *picker {
 	return &picker{
-		m:       m,
-		have:    have,
-		avail:   make([]int, m.NumPieces()),
-		partial: map[int]*partialPiece{},
+		m:         m,
+		blockSize: blockSize,
+		have:      have,
+		avail:     make([]int, m.NumPieces()),
+		partial:   map[int]*partialPiece{},
 	}
 }
 
 func (p *picker) numBlocks(piece int) int {
-	return (p.m.PieceSize(piece) + peerwire.BlockSize - 1) / peerwire.BlockSize
+	return (p.m.PieceSize(piece) + p.blockSize - 1) / p.blockSize
 }
 
 func (p *picker) block(piece, i int) block {
-	begin := i * peerwire.BlockSize
+	begin := i * p.blockSize
 	return block{
 		piece:  piece,
 		begin:  begin,
-		length: min(peerwire.BlockSize, p.m.PieceSize(piece)-begin),
+		length: min(p.blockSize, p.m.PieceSize(piece)-begin),
 	}
 }
 
@@ -141,7 +143,7 @@ func (p *picker) next(bf peerwire.Bitfield, sentByPeer func(block) bool) (block,
 // requested records that a request for b was sent.
 func (p *picker) requested(b block) {
 	if pp := p.partial[b.piece]; pp != nil {
-		pp.reqs[b.begin/peerwire.BlockSize]++
+		pp.reqs[b.begin/p.blockSize]++
 	}
 }
 
@@ -149,7 +151,7 @@ func (p *picker) requested(b block) {
 // choked, timed out or disconnected).
 func (p *picker) released(b block) {
 	if pp := p.partial[b.piece]; pp != nil {
-		j := b.begin / peerwire.BlockSize
+		j := b.begin / p.blockSize
 		if pp.reqs[j] > 0 {
 			pp.reqs[j]--
 		}
@@ -164,7 +166,7 @@ func (p *picker) received(b block, data []byte) (isNew, complete bool) {
 		return false, false
 	}
 
-	j := b.begin / peerwire.BlockSize
+	j := b.begin / p.blockSize
 	if pp.reqs[j] > 0 {
 		pp.reqs[j]--
 	}

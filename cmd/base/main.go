@@ -173,7 +173,7 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 				Event: tracker.EventStarted,
 			})
 		}
-		if m, err = torrent.FetchMetadata(ctx, sw, infoHash, peerID, log.With("component", compMetadata)); err != nil {
+		if m, err = torrent.FetchMetadata(ctx, sw, infoHash, peerID, torrent.MetadataConfig{Logger: log.With("component", compMetadata)}); err != nil {
 			return err
 		}
 	}
