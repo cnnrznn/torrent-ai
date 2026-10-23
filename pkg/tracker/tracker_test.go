@@ -63,3 +63,8 @@ func TestParseResponse(t *testing.T) {
 		require.ErrorContains(t, err, "not a multiple of 6")
 	})
 }
+
+func TestRedact(t *testing.T) {
+	require.Equal(t, "http://tracker.example/announce", Redact("http://user:pw@tracker.example/announce?passkey=secret"))
+	require.Equal(t, "udp://tracker.example:1337/announce", Redact("udp://tracker.example:1337/announce"))
+}

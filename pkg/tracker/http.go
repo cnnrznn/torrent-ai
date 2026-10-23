@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 type httpTracker struct {
 	announce url.URL
 	client   http.Client
+	log      *slog.Logger
 }
 
 // Announce runs a tracker GET request over HTTP and returns the
@@ -45,6 +47,8 @@ func (t *httpTracker) Announce(
 	if err != nil {
 		return nil, err
 	}
+	start := time.Now()
+	t.log.Debug("tracker request", "url", Redact(t.announce.String()), "event", r.Event, "left", r.Left)
 	res, err := t.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -56,7 +60,12 @@ func (t *httpTracker) Announce(
 		return nil, err
 	}
 
-	return parseResponse(bs)
+	resp, err := parseResponse(bs)
+	if err != nil {
+		return nil, fmt.Errorf("http %d: %w", res.StatusCode, err)
+	}
+	t.log.Debug("tracker response", "url", Redact(t.announce.String()), "status", res.StatusCode, "bytes", len(bs), "peers", len(resp.Peers), "interval", resp.Interval, "dur", time.Since(start))
+	return resp, nil
 }
 
 // parseResponse parses a bencoded tracker response

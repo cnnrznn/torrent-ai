@@ -1,8 +1,10 @@
 package tracker
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
+	"log/slog"
 	"net"
 	"net/netip"
 	"testing"
@@ -153,4 +155,22 @@ func TestNewScheme(t *testing.T) {
 	require.ErrorContains(t, err, "unsupported tracker scheme")
 	_, err = New("udp://tracker")
 	require.ErrorContains(t, err, "no port")
+}
+
+func TestUDPLogsRetries(t *testing.T) {
+	f := newFakeUDPTracker(t)
+	f.drop = 1
+	go f.serve()
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	tr, err := New(f.url(), WithUDPRetries(50*time.Millisecond, 3), WithLogger(log))
+	require.NoError(t, err)
+	_, err = tr.Announce(context.Background(), Request{InfoHash: id.Random(), PeerID: id.NewPeerID()})
+	require.NoError(t, err)
+
+	out := buf.String()
+	require.Contains(t, out, `msg="udp tracker timeout"`)
+	require.Contains(t, out, "step=connect")
+	require.Contains(t, out, `msg="udp tracker response"`)
 }

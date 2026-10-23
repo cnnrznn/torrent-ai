@@ -5,6 +5,7 @@ package tracker
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -45,12 +46,21 @@ type Response struct {
 }
 
 type options struct {
+	log        *slog.Logger
 	httpClient http.Client
 	udpTimeout time.Duration
 	udpRetries int
 }
 
 type Option func(*options)
+
+// WithLogger sets where requests, responses and retries are logged at
+// debug level.
+func WithLogger(l *slog.Logger) Option {
+	return func(o *options) {
+		o.log = l
+	}
+}
 
 func WithHTTPClient(c http.Client) Option {
 	return func(o *options) {
@@ -67,6 +77,20 @@ func WithUDPRetries(base time.Duration, retries int) Option {
 	}
 }
 
+// Redact returns an announce URL that is safe to log: user info and
+// the query string, where private trackers often put a passkey, are
+// removed.
+func Redact(announce string) string {
+	u, err := url.Parse(announce)
+	if err != nil {
+		return "(invalid url)"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
 // New creates a tracker client, choosing HTTP or UDP from the announce
 // URL's scheme.
 func New(announce string, opts ...Option) (Tracker, error) {
@@ -76,6 +100,7 @@ func New(announce string, opts ...Option) (Tracker, error) {
 	}
 
 	o := options{
+		log: slog.New(slog.DiscardHandler),
 		httpClient: http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -88,12 +113,12 @@ func New(announce string, opts ...Option) (Tracker, error) {
 
 	switch a.Scheme {
 	case "http", "https":
-		return &httpTracker{announce: *a, client: o.httpClient}, nil
+		return &httpTracker{announce: *a, client: o.httpClient, log: o.log}, nil
 	case "udp":
 		if a.Port() == "" {
 			return nil, fmt.Errorf("udp tracker %q has no port", announce)
 		}
-		return &udpTracker{host: a.Host, timeout: o.udpTimeout, retries: o.udpRetries}, nil
+		return &udpTracker{host: a.Host, timeout: o.udpTimeout, retries: o.udpRetries, log: o.log}, nil
 	}
 	return nil, fmt.Errorf("unsupported tracker scheme %q", a.Scheme)
 }

@@ -274,17 +274,20 @@ func fromFile(path string) (*metainfo.Metainfo, error) {
 }
 
 func announce(ctx context.Context, log *slog.Logger, sw *swarm.Swarm, url string, req tracker.Request) {
-	t, err := tracker.New(url)
+	t, err := tracker.New(url, tracker.WithLogger(log))
 	if err != nil {
-		log.Warn("bad tracker", "url", url, "err", err)
+		log.Warn("tracker invalid", "url", tracker.Redact(url), "err", err)
 		return
 	}
+	start := time.Now()
 	res, err := t.Announce(ctx, req)
 	if err != nil {
-		log.Warn("announce failed", "url", url, "err", err)
+		if ctx.Err() == nil {
+			log.Warn("tracker announce failed", "url", tracker.Redact(url), "err", err, "dur", time.Since(start).Round(time.Millisecond))
+		}
 		return
 	}
-	log.Info("tracker returned peers", "url", url, "peers", len(res.Peers))
+	log.Info("tracker announce done", "url", tracker.Redact(url), "peers", len(res.Peers), "interval", res.Interval, "dur", time.Since(start).Round(time.Millisecond))
 	sw.Add(res.Peers...)
 }
 

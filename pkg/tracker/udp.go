@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"time"
 )
@@ -26,6 +27,7 @@ type udpTracker struct {
 	host    string
 	timeout time.Duration
 	retries int
+	log     *slog.Logger
 }
 
 var errTimeout = errors.New("udp tracker timed out")
@@ -51,8 +53,10 @@ func (t *udpTracker) Announce(ctx context.Context, r Request) (*Response, error)
 		timeout := t.timeout << n
 
 		if connAt.IsZero() || time.Since(connAt) > connectionIDLifetime {
+			t.log.Debug("udp tracker connect", "host", t.host, "attempt", n, "timeout", timeout)
 			connID, err = t.connect(conn, timeout)
 			if errors.Is(err, errTimeout) && ctx.Err() == nil {
+				t.log.Debug("udp tracker timeout", "host", t.host, "step", "connect", "attempt", n, "timeout", timeout)
 				continue
 			}
 			if err != nil {
@@ -61,13 +65,16 @@ func (t *udpTracker) Announce(ctx context.Context, r Request) (*Response, error)
 			connAt = time.Now()
 		}
 
+		t.log.Debug("udp tracker announce", "host", t.host, "attempt", n, "timeout", timeout, "event", r.Event)
 		res, err := t.announce(conn, connID, r, timeout)
 		if errors.Is(err, errTimeout) && ctx.Err() == nil {
+			t.log.Debug("udp tracker timeout", "host", t.host, "step", "announce", "attempt", n, "timeout", timeout)
 			continue
 		}
 		if err != nil {
 			return nil, errors.Join(ctx.Err(), err)
 		}
+		t.log.Debug("udp tracker response", "host", t.host, "peers", len(res.Peers), "interval", res.Interval)
 		return res, nil
 	}
 
