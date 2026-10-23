@@ -15,7 +15,7 @@ var (
 
 func TestSwarm(t *testing.T) {
 	t.Run("hands out each address once", func(t *testing.T) {
-		s := New(10)
+		s := New(Config{MaxPeers: 10})
 		s.Add(a, b, a)
 		require.Equal(t, 2, s.Len())
 
@@ -32,7 +32,7 @@ func TestSwarm(t *testing.T) {
 	})
 
 	t.Run("respects the limit", func(t *testing.T) {
-		s := New(1)
+		s := New(Config{MaxPeers: 1})
 		s.Add(a, b)
 		_, ok := s.Next()
 		require.True(t, ok)
@@ -43,7 +43,7 @@ func TestSwarm(t *testing.T) {
 
 	t.Run("backs off failed addresses", func(t *testing.T) {
 		now := time.Now()
-		s := New(10)
+		s := New(Config{MaxPeers: 10})
 		s.nowFunc = func() time.Time { return now }
 		s.Add(a)
 
@@ -59,7 +59,7 @@ func TestSwarm(t *testing.T) {
 	})
 
 	t.Run("reuses addresses released cleanly", func(t *testing.T) {
-		s := New(10)
+		s := New(Config{MaxPeers: 10})
 		s.Add(a)
 		addr, _ := s.Next()
 		s.Release(addr, false)
@@ -68,7 +68,7 @@ func TestSwarm(t *testing.T) {
 	})
 
 	t.Run("rejects a duplicate incoming connection", func(t *testing.T) {
-		s := New(10)
+		s := New(Config{MaxPeers: 10})
 		require.True(t, s.Acquire(a))
 		require.False(t, s.Acquire(a))
 		_, ok := s.Next()
@@ -76,7 +76,7 @@ func TestSwarm(t *testing.T) {
 	})
 
 	t.Run("notifies on new addresses", func(t *testing.T) {
-		s := New(10)
+		s := New(Config{MaxPeers: 10})
 		s.Add(a)
 		<-s.Notify()
 		s.Add(a)
@@ -88,14 +88,14 @@ func TestSwarm(t *testing.T) {
 	})
 
 	t.Run("ignores invalid addresses", func(t *testing.T) {
-		s := New(10)
+		s := New(Config{MaxPeers: 10})
 		s.Add(netip.AddrPort{}, netip.MustParseAddrPort("10.0.0.1:0"), netip.MustParseAddrPort("0.0.0.0:1"))
 		require.Zero(t, s.Len())
 	})
 }
 
 func TestBan(t *testing.T) {
-	s := New(10)
+	s := New(Config{MaxPeers: 10})
 	s.Add(a, b)
 	s.Ban(a.Addr())
 	require.Equal(t, 1, s.Banned())
@@ -108,4 +108,23 @@ func TestBan(t *testing.T) {
 		require.NotEqual(t, a.Addr(), addr.Addr())
 	}
 	require.False(t, s.Acquire(netip.AddrPortFrom(a.Addr(), 9999)), "banned by IP, any port")
+}
+
+func TestBackoffConfig(t *testing.T) {
+	now := time.Now()
+	s := New(Config{RetryBackoff: time.Second, MaxBackoff: 3 * time.Second})
+	s.nowFunc = func() time.Time { return now }
+	s.Add(a)
+
+	// Backoff doubles per failure (1s, 2s) and is then capped at 3s.
+	for _, want := range []time.Duration{time.Second, 2 * time.Second, 3 * time.Second, 3 * time.Second} {
+		addr, ok := s.Next()
+		require.True(t, ok)
+		s.Release(addr, true)
+
+		now = now.Add(want - time.Millisecond)
+		_, ok = s.Next()
+		require.False(t, ok, "still backing off before %v", want)
+		now = now.Add(time.Millisecond)
+	}
 }

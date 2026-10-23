@@ -31,7 +31,7 @@ func TestFetchMetadata(t *testing.T) {
 	dead := ln.Addr().(*net.TCPAddr).AddrPort()
 	ln.Close()
 
-	sw := swarm.New(10)
+	sw := swarm.New(swarm.Config{MaxPeers: 10})
 	sw.Add(dead)
 	go func() {
 		// The real peer turns up later, like a slow tracker reply.

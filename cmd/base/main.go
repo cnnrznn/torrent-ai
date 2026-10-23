@@ -120,7 +120,7 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 	trackerLog := log.With("component", compTracker)
 
 	peerID := id.NewPeerID()
-	sw := swarm.New(50)
+	sw := swarm.New(swarm.Config{MaxPeers: 50})
 
 	// A .torrent gives us the metainfo up front; a magnet gives only
 	// the infohash and maybe some trackers.

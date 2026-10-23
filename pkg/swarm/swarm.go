@@ -9,8 +9,26 @@ import (
 	"time"
 )
 
-// maxBackoff caps how long a failing address is skipped.
-const maxBackoff = 10 * time.Minute
+// Config configures a Swarm. Zero fields take the defaults in
+// DefaultConfig.
+type Config struct {
+	// MaxPeers caps active connections, incoming and outgoing.
+	MaxPeers int
+	// RetryBackoff is how long an address is skipped after its first
+	// failure. It doubles with each further failure.
+	RetryBackoff time.Duration
+	// MaxBackoff caps how long a failing address is skipped.
+	MaxBackoff time.Duration
+}
+
+// DefaultConfig returns the default swarm settings.
+func DefaultConfig() Config {
+	return Config{
+		MaxPeers:     50,
+		RetryBackoff: 30 * time.Second,
+		MaxBackoff:   10 * time.Minute,
+	}
+}
 
 type entry struct {
 	active   bool
@@ -22,20 +40,31 @@ type entry struct {
 // for concurrent use.
 type Swarm struct {
 	mu      sync.Mutex
+	cfg     Config
 	addrs   map[netip.AddrPort]*entry
 	banned  map[netip.Addr]bool
-	limit   int
 	active  int
 	notify  chan struct{}
 	nowFunc func() time.Time
 }
 
-// New returns a swarm that allows at most limit active connections.
-func New(limit int) *Swarm {
+// New returns a swarm with the given settings.
+func New(cfg Config) *Swarm {
+	d := DefaultConfig()
+	if cfg.MaxPeers <= 0 {
+		cfg.MaxPeers = d.MaxPeers
+	}
+	if cfg.RetryBackoff <= 0 {
+		cfg.RetryBackoff = d.RetryBackoff
+	}
+	if cfg.MaxBackoff <= 0 {
+		cfg.MaxBackoff = d.MaxBackoff
+	}
+
 	return &Swarm{
+		cfg:     cfg,
 		addrs:   map[netip.AddrPort]*entry{},
 		banned:  map[netip.Addr]bool{},
-		limit:   limit,
 		notify:  make(chan struct{}, 1),
 		nowFunc: time.Now,
 	}
@@ -73,7 +102,7 @@ func (s *Swarm) Next() (netip.AddrPort, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.active >= s.limit {
+	if s.active >= s.cfg.MaxPeers {
 		return netip.AddrPort{}, false
 	}
 
@@ -98,7 +127,7 @@ func (s *Swarm) Acquire(a netip.AddrPort) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.active >= s.limit || s.banned[a.Addr()] {
+	if s.active >= s.cfg.MaxPeers || s.banned[a.Addr()] {
 		return false
 	}
 	e, ok := s.addrs[a]
@@ -131,8 +160,11 @@ func (s *Swarm) Release(a netip.AddrPort, failed bool) {
 
 	if failed {
 		e.failures++
-		backoff := 30 * time.Second << min(e.failures-1, 5)
-		e.retryAt = s.nowFunc().Add(min(backoff, maxBackoff))
+		backoff := s.cfg.MaxBackoff
+		if shift := e.failures - 1; shift < 32 && s.cfg.RetryBackoff<<shift > 0 {
+			backoff = min(s.cfg.RetryBackoff<<shift, s.cfg.MaxBackoff)
+		}
+		e.retryAt = s.nowFunc().Add(backoff)
 	} else {
 		e.failures = 0
 		e.retryAt = time.Time{}

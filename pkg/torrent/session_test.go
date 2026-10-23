@@ -48,7 +48,7 @@ func startSession(t *testing.T, ctx context.Context, m *metainfo.Metainfo, dir s
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	sw := swarm.New(10)
+	sw := swarm.New(swarm.Config{MaxPeers: 10})
 	sw.Add(peers...)
 	s, err := New(m, sw, Config{Dir: dir, PeerID: id.NewPeerID(), Listener: ln})
 	require.NoError(t, err)
@@ -78,7 +78,7 @@ func TestSessionDownload(t *testing.T) {
 	t.Run("a seeder verifies its data on startup", func(t *testing.T) {
 		dir := t.TempDir()
 		writeContent(t, dir, m, data)
-		s, err := New(m, swarm.New(1), Config{Dir: dir})
+		s, err := New(m, swarm.New(swarm.Config{MaxPeers: 1}), Config{Dir: dir})
 		require.NoError(t, err)
 		defer s.storage.Close()
 
@@ -174,7 +174,7 @@ func TestSessionDHTPort(t *testing.T) {
 	addr := ln.Addr().(*net.TCPAddr).AddrPort()
 
 	ports := make(chan netip.AddrPort, 1)
-	s, err := New(m, swarm.New(10), Config{
+	s, err := New(m, swarm.New(swarm.Config{MaxPeers: 10}), Config{
 		Dir:      t.TempDir(),
 		PeerID:   id.NewPeerID(),
 		Listener: ln,
