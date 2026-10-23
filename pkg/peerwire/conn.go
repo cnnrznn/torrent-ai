@@ -116,9 +116,24 @@ func Dial(ctx context.Context, addr netip.AddrPort, local Handshake, opts Option
 	return newConn(nc, remote, opts), nil
 }
 
+// ErrUnknownInfoHash is returned when an incoming peer asks for a
+// torrent we don't have.
+var ErrUnknownInfoHash = errors.New("peer asked for an unknown infohash")
+
 // Accept completes the handshake on an incoming connection. The remote
 // peer speaks first; we answer only if it wants local.InfoHash.
 func Accept(nc net.Conn, local Handshake, opts Options) (*Conn, error) {
+	return AcceptRouted(nc, func(h Handshake) (Handshake, bool) {
+		return local, h.InfoHash == local.InfoHash
+	}, opts)
+}
+
+// AcceptRouted completes the handshake on an incoming connection for a
+// process serving several torrents. It reads the peer's handshake and
+// asks route for the handshake to answer with; route returns false if
+// we don't serve that infohash, and the connection is closed with
+// ErrUnknownInfoHash.
+func AcceptRouted(nc net.Conn, route func(remote Handshake) (Handshake, bool), opts Options) (*Conn, error) {
 	opts = opts.withDefaults()
 	nc.SetDeadline(time.Now().Add(opts.HandshakeTimeout))
 	remote, err := ReadHandshake(nc)
@@ -126,9 +141,10 @@ func Accept(nc net.Conn, local Handshake, opts Options) (*Conn, error) {
 		nc.Close()
 		return nil, err
 	}
-	if remote.InfoHash != local.InfoHash {
+	local, ok := route(remote)
+	if !ok || local.InfoHash != remote.InfoHash {
 		nc.Close()
-		return nil, errors.New("peer asked for an unknown infohash")
+		return nil, ErrUnknownInfoHash
 	}
 	if _, err := nc.Write(local.Bytes()); err != nil {
 		nc.Close()

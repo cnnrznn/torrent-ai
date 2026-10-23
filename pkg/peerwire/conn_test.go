@@ -121,3 +121,52 @@ func TestConnOptions(t *testing.T) {
 		require.ErrorContains(t, c.Err(), "timeout")
 	})
 }
+
+func TestAcceptRouted(t *testing.T) {
+	a, b := id.Random(), id.Random()
+	handshakes := map[id.Hash]Handshake{
+		a: NewHandshake(a, id.NewPeerID(), false),
+		b: NewHandshake(b, id.NewPeerID(), true),
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	type result struct {
+		c   *Conn
+		err error
+	}
+	accepted := make(chan result, 3)
+	go func() {
+		for {
+			nc, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				c, err := AcceptRouted(nc, func(h Handshake) (Handshake, bool) {
+					hs, ok := handshakes[h.InfoHash]
+					return hs, ok
+				}, Options{})
+				accepted <- result{c, err}
+			}()
+		}
+	}()
+	addr := ln.Addr().(*net.TCPAddr).AddrPort()
+
+	for _, h := range []id.Hash{a, b} {
+		client, err := Dial(context.Background(), addr, NewHandshake(h, id.NewPeerID(), false), Options{})
+		require.NoError(t, err)
+		require.Equal(t, handshakes[h].PeerID, client.Peer.PeerID, "answered with that torrent's handshake")
+		r := <-accepted
+		require.NoError(t, r.err)
+		require.Equal(t, h, r.c.Peer.InfoHash)
+		client.Close()
+		r.c.Close()
+	}
+
+	_, err = Dial(context.Background(), addr, NewHandshake(id.Random(), id.NewPeerID(), false), Options{})
+	require.Error(t, err)
+	require.ErrorIs(t, (<-accepted).err, ErrUnknownInfoHash)
+}
