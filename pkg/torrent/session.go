@@ -61,8 +61,10 @@ type Config struct {
 	// requests.
 	Tick time.Duration
 	// MaxMemory caps the bytes held in pieces still being downloaded.
-	// Zero means no limit.
+	// Zero means no limit. Ignored if Memory is set.
 	MaxMemory int64
+	// Memory, if set, is a budget shared with other sessions.
+	Memory *MemoryBudget
 	// Conn tunes peer connections.
 	Conn peerwire.Options
 	// Metadata tunes metadata exchange; PieceSize is used when serving.
@@ -220,7 +222,10 @@ func New(m *metainfo.Metainfo, sw *swarm.Swarm, cfg Config) (*Session, error) {
 		sources:  map[int]map[netip.AddrPort]bool{},
 	}
 
-	s.picker.maxBuffered = cfg.MaxMemory
+	s.picker.budget = cfg.Memory
+	if s.picker.budget == nil {
+		s.picker.budget = NewMemoryBudget(cfg.MaxMemory)
+	}
 
 	if existed {
 		if err := s.verifyExisting(); err != nil {
@@ -270,6 +275,7 @@ func (s *Session) Stats() Stats {
 // Run downloads and seeds until ctx is cancelled.
 func (s *Session) Run(ctx context.Context) error {
 	s.started = time.Now()
+	defer s.picker.releaseAll()
 	ctx, s.span = tracer().Start(ctx, "torrent.session", trace.WithAttributes(
 		attribute.String("torrent.infohash", s.m.InfoHash().Hex()),
 		attribute.String("torrent.name", s.m.Name()),

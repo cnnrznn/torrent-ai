@@ -147,7 +147,7 @@ func TestPickerMemoryCap(t *testing.T) {
 	m, data := makeTorrent(t, pieceLength, 3*pieceLength)
 
 	p := newPicker(m, peerwire.NewBitfield(3), peerwire.BlockSize)
-	p.maxBuffered = pieceLength
+	p.budget = NewMemoryBudget(pieceLength)
 
 	// Peer A has only piece 0, peer B only piece 1.
 	a, b := peerwire.NewBitfield(3), peerwire.NewBitfield(3)
@@ -179,8 +179,40 @@ func TestPickerMemoryCapSmallerThanAPiece(t *testing.T) {
 	const pieceLength = 2 * peerwire.BlockSize
 	m, _ := makeTorrent(t, pieceLength, 2*pieceLength)
 	p := newPicker(m, peerwire.NewBitfield(2), peerwire.BlockSize)
-	p.maxBuffered = 1
+	p.budget = NewMemoryBudget(1)
 
 	_, ok := p.next(full(2), never)
 	require.True(t, ok, "one piece may always be in progress")
+}
+
+func TestSharedMemoryBudget(t *testing.T) {
+	const pieceLength = 2 * peerwire.BlockSize
+	m1, _ := makeTorrent(t, pieceLength, 2*pieceLength)
+	m2, _ := makeTorrent(t, pieceLength, 2*pieceLength)
+
+	budget := NewMemoryBudget(3 * pieceLength)
+	p1 := newPicker(m1, peerwire.NewBitfield(2), peerwire.BlockSize)
+	p2 := newPicker(m2, peerwire.NewBitfield(2), peerwire.BlockSize)
+	p1.budget, p2.budget = budget, budget
+
+	a, b := peerwire.NewBitfield(2), peerwire.NewBitfield(2)
+	a.Set(0)
+	b.Set(1)
+	_, ok := p1.next(a, never)
+	require.True(t, ok)
+	_, ok = p1.next(b, never)
+	require.True(t, ok)
+	_, ok = p2.next(a, never)
+	require.True(t, ok)
+	require.EqualValues(t, 3*pieceLength, budget.Used())
+
+	// The budget is full, but p2 already has a piece in progress.
+	_, ok = p2.next(b, never)
+	require.False(t, ok)
+
+	// A stopping session returns its share.
+	p1.releaseAll()
+	require.EqualValues(t, pieceLength, budget.Used())
+	_, ok = p2.next(b, never)
+	require.True(t, ok)
 }

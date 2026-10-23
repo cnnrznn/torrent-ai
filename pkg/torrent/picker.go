@@ -30,11 +30,12 @@ type picker struct {
 	m         *metainfo.Metainfo
 	blockSize int
 
-	// maxBuffered caps the bytes held in partial pieces; 0 means no
-	// limit. One piece may always be in progress, so a cap smaller than
-	// a piece slows the download instead of stalling it.
-	maxBuffered int64
-	buffered    int64
+	// budget caps the bytes held in partial pieces, possibly shared
+	// with other sessions; nil means no limit. One piece may always be
+	// in progress, so a cap smaller than a piece slows the download
+	// instead of stalling it.
+	budget   *MemoryBudget
+	buffered int64 // this picker's share
 	have        peerwire.Bitfield
 	avail       []int
 	partial     map[int]*partialPiece
@@ -120,8 +121,7 @@ func (p *picker) next(bf peerwire.Bitfield, sentByPeer func(block) bool) (block,
 			}
 		}
 	}
-	if best != -1 && p.maxBuffered > 0 && len(p.partial) > 0 &&
-		p.buffered+int64(p.m.PieceSize(best)) > p.maxBuffered {
+	if best != -1 && !p.budget.reserve(int64(p.m.PieceSize(best)), len(p.partial) == 0) {
 		best = -1
 	}
 	if best != -1 {
@@ -204,6 +204,7 @@ func (p *picker) finish(i int, ok bool) {
 	if ok {
 		if pp != nil {
 			p.buffered -= int64(len(pp.data))
+			p.budget.release(int64(len(pp.data)))
 		}
 		p.have.Set(i)
 		return
@@ -218,6 +219,16 @@ func (p *picker) finish(i int, ok bool) {
 			got:       make([]bool, nb),
 			remaining: nb,
 		}
+	}
+}
+
+// releaseAll returns the memory of every partial piece to the budget,
+// for when the session stops.
+func (p *picker) releaseAll() {
+	for i, pp := range p.partial {
+		p.budget.release(int64(len(pp.data)))
+		p.buffered -= int64(len(pp.data))
+		delete(p.partial, i)
 	}
 }
 
