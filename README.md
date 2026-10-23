@@ -96,20 +96,45 @@ output, and diagnosed it without a human looking at anything:
   arriving at 16.8s, and the 793 MB download taking 46s at 17 MB/s with
   no hash failures.
 
-## Usage
+## Install
+
+Requires Go 1.26 or newer. To install the `torrentai` binary:
 
 ```sh
-go build -o torrent ./cmd/base
+go install github.com/cnnrznn/torrent-ai/cmd/torrentai@latest
+```
 
-./torrent -o ~/Downloads debian.iso.torrent
-./torrent -o ~/Downloads 'magnet:?xt=urn:btih:<infohash>'
+To work on the code, clone it and install from your copy. Run the same
+`go install` again after each edit:
+
+```sh
+git clone https://github.com/cnnrznn/torrent-ai
+cd torrent-ai
+go install ./cmd/torrentai
+```
+
+Either way the binary lands in `$(go env GOPATH)/bin` (`~/go/bin` unless
+`GOBIN` is set), which needs to be on your `PATH`. To build without
+installing, use `go build ./cmd/torrentai`, which writes `./torrentai`.
+
+## Usage
+
+With no flags, a download goes to the current directory, using the DHT
+and any trackers in the link, and the program exits once every piece is
+verified:
+
+```sh
+torrentai 'magnet:?xt=urn:btih:<infohash>'
+torrentai debian.iso.torrent
 
 # The way an agent runs it: bounded, parallel-safe, machine-readable.
-./torrent -timeout 5m -port 0 -log-format json -debug=metadata,session \
+torrentai -timeout 5m -port 0 -log-format json -debug=metadata,session \
   -o /tmp/dl 'magnet:?xt=urn:btih:<infohash>' 2> run.jsonl
 ```
 
-Every tunable parameter is a command-line flag. `./torrent -h` lists them
+Quote magnet links: `?` and `&` mean something to the shell.
+
+Every tunable parameter is a command-line flag. `torrentai -h` lists them
 grouped by subsystem (general, logging, peers, peer connections,
 metadata, trackers, DHT), with defaults:
 
@@ -146,7 +171,7 @@ pkg/peerwire   handshake, messages, connections, extension protocol, metadata
 pkg/dht        KRPC, routing table, lookups, server
 pkg/swarm      peer addresses and the connection cap
 pkg/torrent    download session: piece picker, verification, storage
-cmd/base       the command-line client
+cmd/torrentai the command-line client
 ```
 
 ## Limitations

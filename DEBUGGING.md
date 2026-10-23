@@ -6,9 +6,9 @@ person or an agent, against real magnet links and the live DHT.
 ## Running
 
 ```sh
-go build -o torrent ./cmd/base
+go install ./cmd/torrentai
 
-./torrent -timeout 5m -port 0 -log-format json -debug=metadata,session \
+torrentai -timeout 5m -port 0 -log-format json -debug=metadata,session \
   -o /tmp/dl 'magnet:?xt=urn:btih:<infohash>' 2> run.jsonl
 echo $?
 ```
@@ -23,7 +23,7 @@ echo $?
   the same as `-debug=all`. `-debug=dht` is very chatty on the live DHT
   (one event per query).
 - `-seed` keeps running after completion.
-- Every tunable parameter is a flag; `./torrent -h` lists them by
+- Every tunable parameter is a flag; `torrentai -h` lists them by
   subsystem with their defaults. Flags whose default comes from a BEP are
   marked "spec-defined recommended default"; changing one logs a
   `spec default overridden` warning.
