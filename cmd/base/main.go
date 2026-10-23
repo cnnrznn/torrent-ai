@@ -12,7 +12,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/cnnrznn/torrent-ai/pkg/dht"
 	"github.com/cnnrznn/torrent-ai/pkg/id"
@@ -58,26 +64,32 @@ func main() {
 	cfg.finish()
 	target := r.fs.Arg(0)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	tel, err := setupTelemetry(ctx, cfg.otel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "opentelemetry: %v\n", err)
+		os.Exit(exitError)
+	}
+
 	debugComponents := strings.Split(cfg.debug, ",")
 	if cfg.verbose {
 		debugComponents = append(debugComponents, "all")
 	}
-	log, err := newLogger(os.Stderr, cfg.logFormat, debugComponents)
+	log, err := newLogger(os.Stderr, cfg.logFormat, debugComponents, tel.logHandler)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(exitUsage)
 	}
 	mainLog := log.With("component", compMain)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
 	if cfg.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeoutCause(ctx, cfg.timeout, errTimeout)
 		defer cancel()
 	}
 
-	mainLog.Info("starting", "target", target)
+	mainLog.Info("starting", "target", target, "version", version())
 	mainLog.Info("config", r.values()...)
 	if len(r.fromEnv) > 0 {
 		mainLog.Info("config from environment", "flags", r.fromEnv)
@@ -93,10 +105,35 @@ func main() {
 		os.Exit(exitError)
 	}
 
+	if cfg.otel.enabled {
+		mainLog.Info("opentelemetry enabled",
+			"traces", envOr("OTEL_TRACES_EXPORTER", "otlp"),
+			"metrics", envOr("OTEL_METRICS_EXPORTER", "otlp"),
+			"logs", envOr("OTEL_LOGS_EXPORTER", "otlp"),
+			"endpoint", envOr("OTEL_EXPORTER_OTLP_ENDPOINT", "(default)"),
+			"protocol", envOr("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
+			"service", os.Getenv("OTEL_SERVICE_NAME"),
+		)
+	}
+
+	runCtx, span := otel.Tracer(instrumentationName).Start(ctx, "torrentai.run",
+		trace.WithAttributes(attribute.String("torrent.target", redactTarget(target))))
 	start := time.Now()
-	err = run(ctx, log, target, cfg)
+	err = run(runCtx, log, target, cfg)
 	elapsed := time.Since(start).Round(time.Millisecond)
+	if err != nil && ctx.Err() == nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End()
 	stopProfiling()
+
+	// Flush telemetry before exiting, even after an interrupt.
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	if err := tel.shutdown(shutdownCtx); err != nil {
+		mainLog.Warn("opentelemetry shutdown failed", "err", err)
+	}
+	cancelShutdown()
 
 	switch {
 	case err == nil:
@@ -123,6 +160,7 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 
 	peerID := id.NewPeerID()
 	sw := swarm.New(cfg.swarm)
+	var session atomic.Pointer[torrent.Session]
 
 	direct, err := resolvePeers(cfg.peers)
 	if err != nil {
@@ -191,6 +229,10 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 		go labeled(ctx, compDHT, func(ctx context.Context) { dhtPeers(ctx, dhtCfg.Logger, node, sw, infoHash, port, cfg) })
 	}
 	mainLog.Info("listening", "port", port, "dht", node != nil)
+	if err := registerMetrics(&session, sw, node); err != nil {
+		return fmt.Errorf("metrics: %w", err)
+	}
+	trace.SpanFromContext(ctx).SetAttributes(attribute.String("torrent.infohash", infoHash.Hex()))
 
 	if mag != nil {
 		mainLog.Info("fetching metadata", "name", mag.Name, "infohash", infoHash.Hex(), "trackers", len(trackers), "direct_peers", len(direct))
@@ -230,6 +272,7 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 	if err != nil {
 		return err
 	}
+	session.Store(s)
 
 	if mag == nil {
 		for _, tr := range trackers {
@@ -314,6 +357,27 @@ func fromFile(path string) (*metainfo.Metainfo, error) {
 		return nil, err
 	}
 	return metainfo.New(string(bs))
+}
+
+// envOr returns the environment variable k, or def if it's unset.
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+// redactTarget keeps a .torrent path or a magnet link's infohash and
+// name, dropping tracker URLs that may carry passkeys.
+func redactTarget(target string) string {
+	if !strings.HasPrefix(target, "magnet:") {
+		return target
+	}
+	mag, err := metainfo.ParseMagnet(target)
+	if err != nil {
+		return "magnet:(invalid)"
+	}
+	return "magnet:?xt=urn:btih:" + mag.InfoHash.Hex()
 }
 
 // resolvePeers turns -peer host:port values into addresses.

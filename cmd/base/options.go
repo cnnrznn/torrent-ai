@@ -43,6 +43,7 @@ type config struct {
 	dhtStatsInterval time.Duration
 
 	profiling profiling
+	otel      otelConfig
 
 	swarm    swarm.Config
 	session  torrent.Config
@@ -104,6 +105,21 @@ func registerFlags(r *registry, cfg *config) {
 	r.str(&cfg.profiling.heapFile, "flame-heap-file", "write a heap profile to this file at exit")
 	r.integer(&cfg.profiling.blockRate, "flame-block-rate", 0, "record blocking events lasting this many nanoseconds or more (runtime.SetBlockProfileRate); 0 is off, 1 records all", "")
 	r.integer(&cfg.profiling.mutexFraction, "flame-mutex-fraction", 0, "sample 1 in this many mutex contention events (runtime.SetMutexProfileFraction); 0 is off", "")
+
+	r.group("OpenTelemetry")
+	r.boolean(&cfg.otel.enabled, "otel", "export traces, metrics and logs with OpenTelemetry; TORRENT_AI_OTEL turns it on just by being set. The flags below map to the standard OTEL_* variables, which apply when a flag is left empty")
+	r.str(&cfg.otel.endpoint, "otel-endpoint", "OTLP endpoint, e.g. http://localhost:4318 (OTEL_EXPORTER_OTLP_ENDPOINT)")
+	r.str(&cfg.otel.protocol, "otel-protocol", "OTLP protocol: grpc or http/protobuf (OTEL_EXPORTER_OTLP_PROTOCOL; default http/protobuf)")
+	r.str(&cfg.otel.headers, "otel-headers", "OTLP headers as key=value,key=value, e.g. for an API key; never logged (OTEL_EXPORTER_OTLP_HEADERS)")
+	r.secret("otel-headers")
+	r.str(&cfg.otel.insecure, "otel-insecure", "true to use OTLP over gRPC without TLS (OTEL_EXPORTER_OTLP_INSECURE)")
+	r.str(&cfg.otel.tracesExporter, "otel-traces-exporter", "otlp, console or none (OTEL_TRACES_EXPORTER; default otlp)")
+	r.str(&cfg.otel.metricsExporter, "otel-metrics-exporter", "otlp, prometheus, console or none (OTEL_METRICS_EXPORTER; default otlp)")
+	r.str(&cfg.otel.logsExporter, "otel-logs-exporter", "otlp, console or none (OTEL_LOGS_EXPORTER; default otlp)")
+	r.str(&cfg.otel.serviceName, "otel-service-name", "service.name resource attribute (OTEL_SERVICE_NAME; default torrent-ai)")
+	r.str(&cfg.otel.resourceAttrs, "otel-resource-attributes", "extra resource attributes as key=value,key=value (OTEL_RESOURCE_ATTRIBUTES)")
+	r.str(&cfg.otel.sampleRatio, "otel-sample-ratio", "fraction of traces to keep, 0 to 1 (sets OTEL_TRACES_SAMPLER=parentbased_traceidratio; default keeps all)")
+	r.duration(&cfg.otel.metricInterval, "otel-metric-interval", 0, "how often metrics are exported (OTEL_METRIC_EXPORT_INTERVAL; default 1m)", "")
 
 	r.group("Peers")
 	r.list(&cfg.peers, "peer", "peer address (host:port) to connect to directly; repeatable or comma-separated")
@@ -182,6 +198,9 @@ func (cfg *config) validate() error {
 		if _, _, err := net.SplitHostPort(a); err != nil {
 			return fmt.Errorf("-flame %q: %w", a, err)
 		}
+	}
+	if err := cfg.otel.validate(); err != nil {
+		return err
 	}
 	if cfg.logFormat != "text" && cfg.logFormat != "json" {
 		return fmt.Errorf("-log-format must be text or json, got %q", cfg.logFormat)

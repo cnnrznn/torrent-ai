@@ -33,9 +33,10 @@ type flagGroup struct {
 }
 
 type flagInfo struct {
-	kind string // placeholder shown in help, e.g. "duration"
-	def  string // default, as the flag prints it
-	spec string // non-empty if a spec defines the default
+	kind   string // placeholder shown in help, e.g. "duration"
+	def    string // default, as the flag prints it
+	spec   string // non-empty if a spec defines the default
+	secret bool   // value is redacted from logs
 }
 
 func newRegistry(name, usageArg string) *registry {
@@ -165,13 +166,23 @@ type specOverride struct {
 	name, value, def, spec string
 }
 
+// secret marks a flag whose value must not be logged, such as one
+// carrying credentials.
+func (r *registry) secret(name string) {
+	r.info[name].secret = true
+}
+
 // values returns every flag's effective value, in help order, for
-// logging.
+// logging. Secret values are redacted.
 func (r *registry) values() []any {
 	var attrs []any
 	for _, g := range r.groups {
 		for _, name := range g.names {
-			attrs = append(attrs, name, r.fs.Lookup(name).Value.String())
+			v := r.fs.Lookup(name).Value.String()
+			if r.info[name].secret && v != "" {
+				v = "(redacted)"
+			}
+			attrs = append(attrs, name, v)
 		}
 	}
 	return attrs

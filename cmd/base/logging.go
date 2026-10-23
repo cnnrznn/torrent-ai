@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,10 +21,11 @@ const (
 
 var components = []string{compMain, compSession, compMetadata, compTracker, compDHT}
 
-// newLogger returns a logger writing text or JSON to w. Records are
-// logged at info and above, plus debug for the components named in
-// debug ("all" for every component).
-func newLogger(w io.Writer, format string, debug []string) (*slog.Logger, error) {
+// newLogger returns a logger writing text or JSON to w, and to extra
+// when it isn't nil (the OTel log pipeline). Records are logged at info
+// and above, plus debug for the components named in debug ("all" for
+// every component).
+func newLogger(w io.Writer, format string, debug []string, extra slog.Handler) (*slog.Logger, error) {
 	opts := &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 		// Durations read as "1.5s" rather than nanoseconds in JSON.
@@ -56,7 +58,48 @@ func newLogger(w io.Writer, format string, debug []string) (*slog.Logger, error)
 		enabled[c] = true
 	}
 
+	if extra != nil {
+		inner = teeHandler{inner, extra}
+	}
 	return slog.New(&componentHandler{inner: inner, debug: enabled}), nil
+}
+
+// teeHandler sends each record to every handler that wants it.
+type teeHandler []slog.Handler
+
+func (t teeHandler) Enabled(ctx context.Context, l slog.Level) bool {
+	for _, h := range t {
+		if h.Enabled(ctx, l) {
+			return true
+		}
+	}
+	return false
+}
+
+func (t teeHandler) Handle(ctx context.Context, r slog.Record) error {
+	var errs []error
+	for _, h := range t {
+		if h.Enabled(ctx, r.Level) {
+			errs = append(errs, h.Handle(ctx, r.Clone()))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (t teeHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	out := make(teeHandler, len(t))
+	for i, h := range t {
+		out[i] = h.WithAttrs(attrs)
+	}
+	return out
+}
+
+func (t teeHandler) WithGroup(name string) slog.Handler {
+	out := make(teeHandler, len(t))
+	for i, h := range t {
+		out[i] = h.WithGroup(name)
+	}
+	return out
 }
 
 func isComponent(c string) bool {
