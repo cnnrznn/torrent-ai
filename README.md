@@ -109,10 +109,24 @@ go build -o torrent ./cmd/base
   -o /tmp/dl 'magnet:?xt=urn:btih:<infohash>' 2> run.jsonl
 ```
 
-Flags: `-o` download directory, `-port` TCP/UDP port (0 picks a free
-one), `-dht=false` to use trackers only, `-seed` to keep seeding after
-completion, `-timeout`, `-log-format`, `-debug`, `-v`. Ctrl-C shuts down
-cleanly, and the next run resumes from the verified pieces on disk.
+Every tunable parameter is a command-line flag. `./torrent -h` lists them
+grouped by subsystem (general, logging, peers, peer connections,
+metadata, trackers, DHT), with defaults:
+
+- **Resources:** `-max-peers`, `-max-requests` per peer, and
+  `-max-memory`, which caps RAM held in pieces still being downloaded.
+- **Peer sources:** `-peer` to connect straight to a given client,
+  `-tracker` to add trackers, `-trackers=false` and `-dht=false` to turn
+  sources off, and `-dht-routers` to bootstrap elsewhere.
+- **Timeouts, intervals and limits** for every subsystem.
+
+Parameters a BEP defines (block size, keep-alive interval, metadata piece
+size, the DHT's bucket size and token lifetime, UDP tracker retries) are
+tunable too. They default to the spec-defined recommended value, are
+marked as such in `-h`, and log a warning when changed.
+
+Ctrl-C shuts down cleanly, and the next run resumes from the verified
+pieces on disk.
 
 ## What's implemented
 

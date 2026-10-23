@@ -22,8 +22,23 @@ echo $?
   (`main`, `session`, `metadata`, `tracker`, `dht`, or `all`). `-v` is
   the same as `-debug=all`. `-debug=dht` is very chatty on the live DHT
   (one event per query).
-- `-dht=false` limits peer sources to trackers; `-seed` keeps running
-  after completion.
+- `-seed` keeps running after completion.
+- Every tunable parameter is a flag; `./torrent -h` lists them by
+  subsystem with their defaults. Flags whose default comes from a BEP are
+  marked "spec-defined recommended default"; changing one logs a
+  `spec default overridden` warning.
+
+Flags that are useful when debugging:
+
+- Peer sources: `-peer host:port` connects straight to a given client
+  (repeatable), which is handy for interop testing. `-tracker URL` adds
+  a tracker. `-trackers=false` skips the torrent's own trackers, and
+  `-dht=false` disables the DHT, so one source can be tested at a time.
+  `-dht-routers` bootstraps from your own nodes.
+- Faster feedback: `-status-interval`, `-metadata-heartbeat`,
+  `-dht-stats-interval`, `-dht-retry-interval`, and short timeouts
+  such as `-request-timeout` and `-dht-query-timeout`.
+- Resource limits: `-max-peers`, `-max-requests`, `-max-memory`.
 
 A good test torrent is Debian's netinst image. It has a large swarm, and
 SHA-256 sums are published for checking the result. The current
@@ -52,19 +67,23 @@ match on it, not on the text of `err`.
 
 | event | level | keys |
 |---|---|---|
-| `starting` | info | target, dir, port, dht, seed, timeout |
+| `starting` | info | target |
+| `config` | info | every flag's effective value, keyed by flag name |
+| `spec default overridden` | warn | flag, value, default, spec |
+| `no peer sources` | warn | hint (DHT and trackers disabled, no -peer or -tracker) |
 | `listening` | info | port (the real port), dht |
-| `fetching metadata` | info | name, infohash, trackers |
+| `fetching metadata` | info | name, infohash, trackers, direct_peers |
 | `loaded torrent` | info | name, size, pieces, infohash |
-| `status` | info | every 5s, see below |
+| `status` | info | every `-status-interval` (5s), see below |
 | `seeding` | info | |
 | `exit` | info/error | result, elapsed, code, err |
 
 `status` keys: `phase` (downloading, seeding), `pieces`/`of`/`percent`,
 `left`, `down`/`up` (bytes) and `down_rate`/`up_rate` (bytes/s over the
-last 5s), `peers` connected, `unchoked_us` (peers letting us request),
-`interested` (peers with pieces we need), `requests` in flight, `known`
-addresses, `banned` IPs, `dials`/`dial_failures`, `accepted` incoming,
+last status line), `peers` connected, `unchoked_us` (peers letting us
+request), `interested` (peers with pieces we need), `requests` in
+flight, `buffered` (bytes held in pieces still downloading, capped by
+`-max-memory`), `known` addresses, `banned` IPs, `dials`/`dial_failures`, `accepted` incoming,
 `hash_failures`, `request_timeouts`, `dht_nodes`.
 
 ### metadata (magnet links only)
@@ -119,10 +138,11 @@ trackers put passkeys.
 | event | level | keys |
 |---|---|---|
 | `dht bootstrapped` | info | nodes, lookup |
-| `dht bootstrap failed` | warn | err, lookup |
-| `dht lookup done` | info | infohash, nodes, lookup (every 5 minutes) |
-| `dht lookup failed` | warn | err, lookup |
-| `dht stats` | info | every minute: nodes, buckets, stored_peers, sent, replies, error_replies, timeouts, received, announced_to_us, bad_packets |
+| `dht bootstrap weak` | warn | nodes, want (k), lookup |
+| `dht bootstrap failed` | warn | err, nodes, lookup |
+| `dht lookup done` | info | infohash, nodes, lookup, next |
+| `dht lookup failed` | warn | err, lookup, next |
+| `dht stats` | info | every `-dht-stats-interval` (1m): nodes, buckets, stored_peers, sent, replies, error_replies, timeouts, received, announced_to_us, bad_packets |
 | `dht router` | warn/debug | router, addr, result, nodes, err, dur |
 | `dht query` | debug | method, to, result (ok, timeout, error), code, msg, dur |
 | `dht query received` | debug | method, from |
@@ -134,6 +154,11 @@ trackers put passkeys.
 `announced`, `dur`, and `closest_bits`, the number of leading bits the
 closest answering node shares with the target. On the live DHT a lookup
 that converged reaches about 20 or more.
+
+`next` is when the next lookup runs. A healthy lookup waits
+`-dht-interval` (5m). After a weak bootstrap (fewer than `-dht-k` nodes),
+a failure or a lookup with no peers, it retries after
+`-dht-retry-interval` (5s), doubling up to `-dht-interval`.
 
 ## Recipes
 
@@ -162,10 +187,11 @@ jq -r 'select(.msg == "peer connected") | .client' run.jsonl | sort | uniq -c | 
 
 **Stuck fetching metadata.** Read `metadata waiting`.
 - `known=0`: no peer source has produced addresses. Look for
-  `dht bootstrapped` (or `dht bootstrap failed` and `dht router`
-  warnings) and `tracker announce failed`. Bootstrap often takes 10-20s,
-  and `router.bittorrent.com` regularly times out; `dht.transmissionbt.com`
-  is usually enough.
+  `dht bootstrapped` (or `dht bootstrap weak`, `dht bootstrap failed`
+  and `dht router` warnings) and `tracker announce failed`. Bootstrap
+  often takes 10-20s, and `router.bittorrent.com` regularly times out;
+  `dht.transmissionbt.com` is usually enough. A weak bootstrap retries
+  on its own (see `next`); `-dht-routers` can point at other nodes.
 - `known` > 0 but no success: the `failed_<reason>` counts say why.
   Mostly `dial` is normal (NAT, firewalls); mostly `no_ut_metadata` or
   `rejected` means the peers can't serve metadata.
@@ -180,7 +206,8 @@ means connections are failing (see the dial recipe). `peers` high but
 `unchoked_us` low means peers are choking us. `requests` near zero
 while `unchoked_us` > 0 means we have nothing to request from them
 (`interested` low). Growing `request_timeouts` means peers aren't
-answering.
+answering. `buffered` sitting at `-max-memory` means the memory cap is
+what's limiting the download.
 
 **Hash failures.** `piece hash failed` names the senders. A peer that
 alone sent a failed piece, or contributed to 3, is banned (`peer banned`),
