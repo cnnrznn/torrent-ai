@@ -169,6 +169,43 @@ func TestParseIntegerCanonical(t *testing.T) {
 	})
 }
 
+func TestEncode(t *testing.T) {
+	t.Run("encodes a string", func(t *testing.T) {
+		require.Equal(t, "5:hello", EncodeString("hello"))
+		require.Equal(t, "0:", EncodeString(""))
+	})
+
+	t.Run("encodes an integer", func(t *testing.T) {
+		require.Equal(t, "i42e", EncodeInteger(42))
+		require.Equal(t, "i-3e", EncodeInteger(-3))
+		require.Equal(t, "i0e", EncodeInteger(0))
+	})
+
+	t.Run("encodes a list", func(t *testing.T) {
+		require.Equal(t, "le", EncodeList())
+		require.Equal(t, "l4:spami7ee", EncodeList(EncodeString("spam"), EncodeInteger(7)))
+	})
+
+	t.Run("encodes a dictionary with sorted keys", func(t *testing.T) {
+		d := EncodeDictionary(map[string]string{
+			"zebra": EncodeInteger(1),
+			"apple": EncodeString("x"),
+		})
+		require.Equal(t, "d5:apple1:x5:zebrai1ee", d)
+	})
+
+	t.Run("round trips through the parser", func(t *testing.T) {
+		in := map[string]string{
+			"a": EncodeString("hello"),
+			"b": EncodeList(EncodeInteger(1), EncodeDictionary(map[string]string{})),
+		}
+		d, size, err := ParseDictionary(EncodeDictionary(in))
+		require.NoError(t, err)
+		require.Equal(t, len(EncodeDictionary(in)), size)
+		require.Equal(t, in, d)
+	})
+}
+
 func FuzzParseDictionary(f *testing.F) {
 	f.Add("d3:key5:value4:key26:value2e")
 	f.Add("l4:helli69420el6:nesteded3:key5:valueee")

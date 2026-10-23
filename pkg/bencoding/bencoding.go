@@ -3,6 +3,7 @@ package bencoding
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -178,6 +179,50 @@ func parseDecimal(s string, allowNegative bool) (int, error) {
 	}
 
 	return strconv.Atoi(s)
+}
+
+// EncodeString bencodes a string.
+func EncodeString(s string) string {
+	return strconv.Itoa(len(s)) + ":" + s
+}
+
+// EncodeInteger bencodes an integer.
+func EncodeInteger(n int) string {
+	return "i" + strconv.Itoa(n) + "e"
+}
+
+// EncodeList bencodes a list. Each item must already be bencoded.
+func EncodeList(items ...string) string {
+	var b strings.Builder
+
+	b.WriteByte('l')
+	for _, item := range items {
+		b.WriteString(item)
+	}
+	b.WriteByte('e')
+
+	return b.String()
+}
+
+// EncodeDictionary bencodes a dictionary. Each value must already be
+// bencoded. Keys are written in sorted order, as BEP 3 requires.
+func EncodeDictionary(m map[string]string) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+
+	b.WriteByte('d')
+	for _, k := range keys {
+		b.WriteString(EncodeString(k))
+		b.WriteString(m[k])
+	}
+	b.WriteByte('e')
+
+	return b.String()
 }
 
 func typeNext(s string) Type {
