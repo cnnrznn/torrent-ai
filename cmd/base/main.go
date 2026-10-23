@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/cnnrznn/torrent-scratch/pkg/id"
@@ -25,7 +26,7 @@ func main() {
 		verbose = flag.Bool("v", false, "verbose logging")
 	)
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: %s [flags] <file.torrent>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "usage: %s [flags] <file.torrent | magnet:?...>\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -49,17 +50,20 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, log *slog.Logger, path, dir string, port int, seed bool) error {
+func run(ctx context.Context, log *slog.Logger, arg, dir string, port int, seed bool) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	peerID := id.NewPeerID()
+	sw := swarm.New(50)
 
-	bs, err := os.ReadFile(path)
-	if err != nil {
-		return err
+	var m *metainfo.Metainfo
+	var err error
+	if strings.HasPrefix(arg, "magnet:") {
+		m, err = fromMagnet(ctx, log, sw, arg, peerID, port)
+	} else {
+		m, err = fromFile(arg)
 	}
-	m, err := metainfo.New(string(bs))
 	if err != nil {
 		return err
 	}
@@ -69,8 +73,6 @@ func run(ctx context.Context, log *slog.Logger, path, dir string, port int, seed
 	if err != nil {
 		return err
 	}
-
-	sw := swarm.New(50)
 
 	s, err := torrent.New(m, sw, torrent.Config{
 		Dir:      dir,
@@ -124,6 +126,38 @@ func run(ctx context.Context, log *slog.Logger, path, dir string, port int, seed
 			)
 		}
 	}
+}
+
+func fromFile(path string) (*metainfo.Metainfo, error) {
+	bs, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return metainfo.New(string(bs))
+}
+
+// fromMagnet announces to the magnet's trackers and fetches the info
+// dict from the peers they return.
+func fromMagnet(ctx context.Context, log *slog.Logger, sw *swarm.Swarm, uri string, peerID id.Hash, port int) (*metainfo.Metainfo, error) {
+	mag, err := metainfo.ParseMagnet(uri)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("fetching metadata", "name", mag.Name, "infohash", mag.InfoHash.Hex(), "trackers", len(mag.Trackers))
+
+	for _, tr := range mag.Trackers {
+		go announce(ctx, log, sw, tr, tracker.Request{
+			InfoHash: mag.InfoHash,
+			PeerID:   peerID,
+			Port:     port,
+			// The size is unknown until we have the metadata; any
+			// non-zero value marks us as a leecher.
+			Left:  1,
+			Event: tracker.EventStarted,
+		})
+	}
+
+	return torrent.FetchMetadata(ctx, sw, mag.InfoHash, peerID, log)
 }
 
 func announce(ctx context.Context, log *slog.Logger, sw *swarm.Swarm, url string, req tracker.Request) {
