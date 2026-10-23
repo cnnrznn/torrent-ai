@@ -113,8 +113,70 @@ func TestParseDictionary(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, 28, size)
 		require.Equal(t, map[string]string{
-			"key": "5:value",
+			"key":  "5:value",
 			"key2": "6:value2",
 		}, d)
+	})
+}
+
+func TestParseEmptyAndTruncated(t *testing.T) {
+	t.Run("empty input returns errors", func(t *testing.T) {
+		_, _, err := ParseString("")
+		require.Error(t, err)
+		_, _, err = ParseInteger("")
+		require.Error(t, err)
+		_, _, err = ParseList("")
+		require.Error(t, err)
+		_, _, err = ParseDictionary("")
+		require.Error(t, err)
+	})
+
+	t.Run("truncated list returns an error", func(t *testing.T) {
+		_, _, err := ParseList("l")
+		require.Error(t, err)
+	})
+
+	t.Run("truncated dictionary returns an error", func(t *testing.T) {
+		_, _, err := ParseDictionary("d3:foo")
+		require.Error(t, err)
+		_, _, err = ParseDictionary("d3:fooi1e")
+		require.ErrorContains(t, err, "EOF parsing dictionary")
+	})
+
+	t.Run("huge string length returns an error", func(t *testing.T) {
+		_, _, err := ParseString("9223372036854775807:a")
+		require.ErrorContains(t, err, "string is shorter than length")
+	})
+
+	t.Run("negative string length returns an error", func(t *testing.T) {
+		_, _, err := ParseString("-1:a")
+		require.ErrorContains(t, err, "invalid string size:")
+	})
+}
+
+func TestParseIntegerCanonical(t *testing.T) {
+	for _, s := range []string{"ie", "i-0e", "i03e", "i-03e", "i+3e", "i-e"} {
+		t.Run("rejects "+s, func(t *testing.T) {
+			_, _, err := ParseInteger(s)
+			require.ErrorContains(t, err, "invalid integer:")
+		})
+	}
+
+	t.Run("accepts zero", func(t *testing.T) {
+		x, _, err := ParseInteger("i0e")
+		require.NoError(t, err)
+		require.Zero(t, x)
+	})
+}
+
+func FuzzParseDictionary(f *testing.F) {
+	f.Add("d3:key5:value4:key26:value2e")
+	f.Add("l4:helli69420el6:nesteded3:key5:valueee")
+	f.Add("d1:ad1:bli1ei-2eee")
+	f.Fuzz(func(t *testing.T, s string) {
+		ParseDictionary(s)
+		ParseList(s)
+		ParseInteger(s)
+		ParseString(s)
 	})
 }

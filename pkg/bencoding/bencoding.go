@@ -24,24 +24,23 @@ func ParseString(s string) (string, int, error) {
 		return "", 0, errors.New("invalid string")
 	}
 
-	size, err := strconv.Atoi(s[:i])
+	size, err := parseDecimal(s[:i], false)
 	if err != nil {
 		return "", 0, fmt.Errorf("invalid string size: %w", err)
 	}
 
 	start := i + 1
-	end := start + size
-
-	if end > len(s) {
+	if size > len(s)-start {
 		return "", 0, errors.New("string is shorter than length")
 	}
+	end := start + size
 
 	return s[start:end], end, nil
 }
 
 // LenInteger finds the size of a bencoded integer.
 func ParseInteger(s string) (int, int, error) {
-	if s[0] != 'i' {
+	if len(s) == 0 || s[0] != 'i' {
 		return 0, 0, errors.New("integer does not begin with i")
 	}
 
@@ -52,7 +51,7 @@ func ParseInteger(s string) (int, int, error) {
 
 	end := i + 1
 
-	n, err := strconv.Atoi(s[1:i])
+	n, err := parseDecimal(s[1:i], true)
 	if err != nil {
 		return 0, 0, fmt.Errorf("invalid integer: %w", err)
 	}
@@ -61,8 +60,7 @@ func ParseInteger(s string) (int, int, error) {
 }
 
 func ParseList(s string) ([]string, int, error) {
-	if s[0] != 'l' {
-		fmt.Println(s)
+	if len(s) == 0 || s[0] != 'l' {
 		return nil, 0, errors.New("invalid list")
 	}
 
@@ -111,7 +109,7 @@ func ParseDictionary(s string) (map[string]string, int, error) {
 	// Rinse and repeat to build a map of string->string
 	result := map[string]string{}
 
-	if s[0] != 'd' {
+	if len(s) == 0 || s[0] != 'd' {
 		return nil, 0, errors.New("dictionary does not begin with d")
 	}
 
@@ -145,6 +143,9 @@ func ParseDictionary(s string) (map[string]string, int, error) {
 		end += size
 	}
 
+	if end >= len(s) {
+		return nil, 0, errors.New("EOF parsing dictionary")
+	}
 	if s[end] != 'e' {
 		return nil, 0, errors.New("dictionary does not end with e")
 	}
@@ -152,7 +153,38 @@ func ParseDictionary(s string) (map[string]string, int, error) {
 	return result, end + 1, nil
 }
 
+// parseDecimal parses a base-10 integer in the canonical form
+// required by BEP 3: no sign other than a leading '-', no leading
+// zeros, and no negative zero.
+func parseDecimal(s string, allowNegative bool) (int, error) {
+	digits := s
+	if allowNegative && strings.HasPrefix(digits, "-") {
+		digits = digits[1:]
+		if digits == "0" {
+			return 0, errors.New("negative zero")
+		}
+	}
+
+	if len(digits) == 0 {
+		return 0, errors.New("no digits")
+	}
+	if len(digits) > 1 && digits[0] == '0' {
+		return 0, errors.New("leading zero")
+	}
+	for i := 0; i < len(digits); i++ {
+		if digits[i] < '0' || digits[i] > '9' {
+			return 0, fmt.Errorf("invalid digit %q", digits[i])
+		}
+	}
+
+	return strconv.Atoi(s)
+}
+
 func typeNext(s string) Type {
+	if len(s) == 0 {
+		return TypeString
+	}
+
 	switch s[0] {
 	case 'l':
 		return TypeList
