@@ -1,5 +1,25 @@
 # Daemon plan
 
+## Status
+
+All five phases are implemented, each with tests; live checks used
+real Debian ISO torrents.
+
+| Phase | Result |
+|---|---|
+| 0: SIGTERM | Done. Live: 0.3s shutdown with 20 peers connected, exit 143 |
+| 1: Many torrents | Done. Two torrents through one listener and one DHT node, found from bare magnets (test) |
+| 2: Daemon, API, client | Done. Live: magnet added through the API, daemon restarted at 30%, resumed without refetching metadata, SHA-256 matches |
+| 3: Long-running | Done. Live: after a restart /readyz is ready at once instead of 15s, first peers in 16s instead of 37s |
+| 4: Observability | Done. Live against Pyroscope 2.3.2: two torrents, 16 uploads, flame graphs split by component and torrent (a 2-minute run, not the planned 30) |
+| 5: Deployment | Files written and checked by a test; not run in a cluster (no Docker or kind available) |
+
+Differences from the plan: the one-shot command keeps its own listener
+(`Config.Listener`) instead of routing; profiles go to Pyroscope as a
+raw body, since 2.3.2 rejected the documented multipart form; and a
+`verifying` state was added.
+
+
 ## Goal
 
 Run torrentai as a long-lived service that downloads and seeds many

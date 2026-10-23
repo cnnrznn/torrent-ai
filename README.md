@@ -137,6 +137,30 @@ torrentai -timeout 5m -port 0 -log-format json -debug=metadata,session \
 
 Quote magnet links: `?` and `&` mean something to the shell.
 
+### The daemon
+
+`torrentai serve` downloads and seeds many torrents in one process. They
+share one peer port, one DHT node and caps on peers and memory. Torrents
+survive restarts: they're saved in a state dir (`~/.local/state/torrentai`
+by default) with their info dicts and the DHT routing table, so a restart
+neither refetches metadata nor bootstraps from scratch.
+
+```sh
+torrentai serve -o ~/Downloads &          # API on <state-dir>/api.sock
+torrentai add 'magnet:?xt=urn:btih:<infohash>'
+torrentai add -o /srv/isos debian.iso.torrent
+torrentai ls                              # -json for scripts
+torrentai status <infohash>
+torrentai rm -delete-files <infohash>
+```
+
+The API is HTTP/JSON (`POST/GET /v1/torrents`, `GET/DELETE
+/v1/torrents/{infohash}`, `/healthz`, `/readyz`) on a unix socket, and
+optionally on TCP with `-api-addr` and `-api-token`. Trackers are
+re-announced for as long as a torrent runs, and `-seed-ratio` or
+`-seed-time` stop seeding. [deploy/](deploy/k8s/README.md) has a
+Dockerfile and Kubernetes manifests.
+
 Every tunable parameter is a command-line flag. `torrentai -h` lists them
 grouped by subsystem (general, logging, peers, peer connections,
 metadata, trackers, DHT), with defaults:
@@ -183,6 +207,15 @@ so a flame graph can be split by subsystem (`-tagfocus` in pprof).
 `-flame-cpu-file` and `-flame-heap-file` write profiles at exit instead,
 for one-off runs.
 
+**Continuous profiling.** `TORRENT_AI_PYROSCOPE_URL` (or
+`-pyroscope-url`) uploads a CPU and a heap profile every minute to
+Pyroscope or Grafana Cloud Profiles, and a final pair at shutdown. A
+homelab server needs only the URL; Grafana Cloud takes
+`-pyroscope-user` and `-pyroscope-password`, multi-tenant servers
+`-pyroscope-tenant`, and a self-signed certificate `-pyroscope-ca-file`.
+In the daemon each torrent's goroutines are also labeled with its
+infohash, so flame graphs split per torrent.
+
 **OpenTelemetry.** `TORRENT_AI_OTEL` (or `-otel`) exports traces, metrics
 and logs, over OTLP to a collector by default:
 
@@ -191,11 +224,14 @@ TORRENT_AI_OTEL= TORRENT_AI_OTEL_ENDPOINT=http://localhost:4318 \
   torrentai 'magnet:?xt=urn:btih:<infohash>'
 ```
 
-- **Traces:** one trace per run, with spans for tracker announces, DHT
-  bootstrap and lookups, the metadata fetch and each attempt, and the
-  download session with a span per peer connection.
+- **Traces:** one trace per run (per torrent in the daemon), with spans
+  for tracker announces, DHT bootstrap and lookups, the metadata fetch
+  and each attempt, the download session with a span per peer
+  connection, and API requests.
 - **Metrics:** progress, rates, peer counts, dial and hash failures,
-  memory buffered and DHT traffic, 27 instruments in all.
+  memory buffered and DHT traffic. The daemon labels them with
+  `torrent.infohash` and `torrent.name`
+  (`-otel-aggregate-torrents` sums them instead), plus torrents by state.
 - **Logs:** the same events as stderr, with the same `-debug` filtering.
 
 Exporters, protocol, endpoint, headers, sampling and resource
@@ -219,9 +255,12 @@ pkg/metainfo   .torrent files and magnet links
 pkg/tracker    HTTP and UDP tracker clients
 pkg/peerwire   handshake, messages, connections, extension protocol, metadata
 pkg/dht        KRPC, routing table, lookups, server
-pkg/swarm      peer addresses and the connection cap
-pkg/torrent    download session: piece picker, verification, storage
-cmd/torrentai the command-line client
+pkg/swarm      peer addresses and connection caps, shareable across torrents
+pkg/torrent    download session: piece picker, verification, storage, memory budget
+pkg/peersource tracker and DHT loops that find peers for a torrent
+pkg/daemon     many torrents in one process: Manager, state store, HTTP API and client
+pkg/pyroscope  continuous profile uploads
+cmd/torrentai  the command: one-shot download, serve, and the API client commands
 ```
 
 ## Limitations
@@ -231,8 +270,11 @@ cmd/torrentai the command-line client
   clients, and answering their DHT queries, hasn't been checked against
   another implementation yet.
 - Every interested peer is unchoked; there is no choking algorithm.
-- Trackers are announced to once per run, and `announce-list`
-  (BEP 12), PEX (BEP 11) and IPv6 aren't supported.
+- The one-shot command announces to trackers once; the daemon
+  re-announces. `announce-list` (BEP 12), PEX (BEP 11) and IPv6 aren't
+  supported.
+- The Kubernetes manifests are checked by a test but haven't been run in
+  a cluster yet.
 
 ## Testing
 

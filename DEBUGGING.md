@@ -116,6 +116,37 @@ flight, `buffered` (bytes held in pieces still downloading, capped by
 `-max-memory`), `known` addresses, `banned` IPs, `dials`/`dial_failures`, `accepted` incoming,
 `hash_failures`, `request_timeouts`, `dht_nodes`.
 
+### daemon (`torrentai serve`)
+
+The daemon's lines use the same components; each torrent's carry
+`infohash`, and `name` once known.
+
+| event | level | keys |
+|---|---|---|
+| `daemon listening` | info | peer_port, dht, state_dir, download_dir |
+| `api listening` | info | socket or addr, token |
+| `api reachable without a token` | warn | addr, hint |
+| `daemon status` | info | every `-status-interval`: torrents, metadata, verifying, downloading, seeding, finished, failed, down_rate, up_rate, peers, buffered, dht_nodes |
+| `torrents restored` | info | count, failed |
+| `torrent added` / `torrent removed` | info | dir, magnet, trackers, direct_peers / delete_files |
+| `torrent complete, seeding` | info | |
+| `seeding limit reached` | info | reason (ratio, time), ratio, seeded_for |
+| `torrent restored as finished` | info | dir |
+| `torrent failed` | error | err |
+| `dht routing table restored` | info | nodes, saved, age |
+| `pyroscope uploads started` / `stopped` | info | url, name, interval, auth, tls_skip_verify |
+| `pyroscope upload failed` | warn | profile, err, dur |
+| `pyroscope cpu profiles unavailable` | warn | reason, hint |
+| `api request` | debug | method, path, status, dur |
+
+States in `ls` and the API: `metadata` (fetching the info dict),
+`verifying` (hashing data already on disk), `downloading`, `seeding`,
+`finished` (seeding limit reached), `failed` (see `error`), `stopped`.
+
+To ask a running daemon directly: `torrentai ls -json`, `torrentai status
+-json <infohash>`, or `curl --unix-socket <state-dir>/api.sock
+http://torrentai/v1/torrents`.
+
 ### metadata (magnet links only)
 
 | event | level | keys |
