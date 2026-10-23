@@ -22,6 +22,7 @@ import (
 	"github.com/cnnrznn/torrent-ai/pkg/dht"
 	"github.com/cnnrznn/torrent-ai/pkg/id"
 	"github.com/cnnrznn/torrent-ai/pkg/metainfo"
+	"github.com/cnnrznn/torrent-ai/pkg/peersource"
 	"github.com/cnnrznn/torrent-ai/pkg/swarm"
 	"github.com/cnnrznn/torrent-ai/pkg/torrent"
 	"github.com/cnnrznn/torrent-ai/pkg/tracker"
@@ -239,7 +240,10 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 			return fmt.Errorf("dht: %w", err)
 		}
 		go labeled(ctx, compDHT, func(ctx context.Context) { node.Run(ctx) })
-		go labeled(ctx, compDHT, func(ctx context.Context) { dhtPeers(ctx, dhtCfg.Logger, node, sw, infoHash, port, cfg) })
+		go labeled(ctx, compDHT, func(ctx context.Context) { logDHTStatsEvery(ctx, dhtCfg.Logger, node, cfg.dhtStatsInterval) })
+		go labeled(ctx, compDHT, func(ctx context.Context) {
+			peersource.DHT(ctx, dhtCfg.Logger, node, sw, infoHash, port, cfg.peerSourceDHT())
+		})
 	}
 	mainLog.Info("listening", "port", port, "dht", node != nil)
 	if err := registerMetrics(&session, sw, node); err != nil {
@@ -260,7 +264,7 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 				Event:   tracker.EventStarted,
 				NumWant: cfg.numWant,
 			}
-			go labeled(ctx, compTracker, func(ctx context.Context) { announce(ctx, trackerLog, sw, tr, trackerOpts, req) })
+			go labeled(ctx, compTracker, func(ctx context.Context) { peersource.Tracker(ctx, trackerLog, sw, tr, trackerOpts, req) })
 		}
 		metaCfg := cfg.metadata
 		metaCfg.Logger = log.With("component", compMetadata)
@@ -297,7 +301,7 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 				Event:    tracker.EventStarted,
 				NumWant:  cfg.numWant,
 			}
-			go labeled(ctx, compTracker, func(ctx context.Context) { announce(ctx, trackerLog, sw, tr, trackerOpts, req) })
+			go labeled(ctx, compTracker, func(ctx context.Context) { peersource.Tracker(ctx, trackerLog, sw, tr, trackerOpts, req) })
 		}
 	}
 
@@ -406,93 +410,19 @@ func resolvePeers(hosts []string) ([]netip.AddrPort, error) {
 	return addrs, nil
 }
 
-func announce(ctx context.Context, log *slog.Logger, sw *swarm.Swarm, url string, opts []tracker.Option, req tracker.Request) {
-	t, err := tracker.New(url, opts...)
-	if err != nil {
-		log.Warn("tracker invalid", "url", tracker.Redact(url), "err", err)
-		return
-	}
-	start := time.Now()
-	res, err := t.Announce(ctx, req)
-	if err != nil {
-		if ctx.Err() == nil {
-			log.Warn("tracker announce failed", "url", tracker.Redact(url), "err", err, "dur", time.Since(start).Round(time.Millisecond))
-		}
-		return
-	}
-	log.Info("tracker announce done", "url", tracker.Redact(url), "peers", len(res.Peers), "interval", res.Interval, "dur", time.Since(start).Round(time.Millisecond))
-	sw.Add(res.Peers...)
-}
-
-// dhtPeers joins the DHT and repeatedly looks up and announces the
-// torrent, feeding the peers it finds into the swarm. It logs a stats
-// line periodically so DHT health is visible without debug logs.
-func dhtPeers(ctx context.Context, log *slog.Logger, node *dht.Server, sw *swarm.Swarm, infoHash id.Hash, port int, cfg config) {
-	go func() {
-		ticker := time.NewTicker(cfg.dhtStatsInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				logDHTStats(log, node.Stats())
-			}
-		}
-	}()
-
-	retry := cfg.dhtRetryInterval
+// logDHTStatsEvery logs the DHT node's counters every interval until
+// ctx is cancelled, so DHT health is visible without debug logs.
+func logDHTStatsEvery(ctx context.Context, log *slog.Logger, node *dht.Server, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 	for {
-		// A table with fewer than k nodes can't support a useful
-		// lookup, so keep bootstrapping until it fills.
-		if node.Nodes() < cfg.dht.K {
-			st, err := node.Bootstrap(ctx, cfg.dhtRouters)
-			if ctx.Err() != nil {
-				return
-			}
-			switch {
-			case err != nil:
-				log.Warn("dht bootstrap failed", "err", err, "nodes", node.Nodes(), "lookup", st)
-			case node.Nodes() < cfg.dht.K:
-				log.Warn("dht bootstrap weak", "nodes", node.Nodes(), "want", cfg.dht.K, "lookup", st)
-			default:
-				log.Info("dht bootstrapped", "nodes", node.Nodes(), "lookup", st)
-			}
-		}
-
-		st, err := node.Announce(ctx, infoHash, port, func(peers []netip.AddrPort) {
-			sw.Add(peers...)
-		})
-		if ctx.Err() != nil {
-			return
-		}
-
-		var wait time.Duration
-		wait, retry = nextLookup(node.Nodes() >= cfg.dht.K && err == nil && st.Peers > 0, retry, cfg)
-		if err != nil {
-			log.Warn("dht lookup failed", "err", err, "lookup", st, "next", wait)
-		} else {
-			log.Info("dht lookup done", "infohash", infoHash.Hex(), "nodes", node.Nodes(), "lookup", st, "next", wait)
-		}
-
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(wait):
+		case <-ticker.C:
+			logDHTStats(log, node.Stats())
 		}
 	}
-}
-
-// nextLookup decides how long to wait before the next DHT lookup. A
-// healthy lookup waits the full -dht-interval. Otherwise (too few
-// nodes, an error, or no peers) it retries after retry, doubling the
-// retry each time up to the interval. It returns the wait and the
-// retry to use next time.
-func nextLookup(healthy bool, retry time.Duration, cfg config) (wait, nextRetry time.Duration) {
-	if healthy {
-		return cfg.dhtInterval, cfg.dhtRetryInterval
-	}
-	return retry, min(2*retry, cfg.dhtInterval)
 }
 
 func logDHTStats(log *slog.Logger, st dht.Stats) {

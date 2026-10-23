@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cnnrznn/torrent-ai/pkg/dht"
+	"github.com/cnnrznn/torrent-ai/pkg/peersource"
 	"github.com/cnnrznn/torrent-ai/pkg/peerwire"
 	"github.com/cnnrznn/torrent-ai/pkg/swarm"
 	"github.com/cnnrznn/torrent-ai/pkg/torrent"
@@ -206,6 +207,16 @@ func (cfg *config) validate() error {
 		return fmt.Errorf("-log-format must be text or json, got %q", cfg.logFormat)
 	}
 	return nil
+}
+
+// peerSourceDHT returns the DHT loop settings.
+func (cfg *config) peerSourceDHT() peersource.DHTConfig {
+	return peersource.DHTConfig{
+		Routers:       cfg.dhtRouters,
+		MinNodes:      cfg.dht.K,
+		Interval:      cfg.dhtInterval,
+		RetryInterval: cfg.dhtRetryInterval,
+	}
 }
 
 // finish copies settings that more than one package uses.

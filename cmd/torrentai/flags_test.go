@@ -154,27 +154,6 @@ func TestConfigFlags(t *testing.T) {
 	})
 }
 
-func TestNextLookup(t *testing.T) {
-	cfg := defaultConfig()
-	cfg.dhtRetryInterval = 5 * time.Second
-	cfg.dhtInterval = 30 * time.Second
-
-	// Unhealthy lookups retry sooner, backing off up to the interval.
-	retry := cfg.dhtRetryInterval
-	var waits []time.Duration
-	for range 5 {
-		var wait time.Duration
-		wait, retry = nextLookup(false, retry, cfg)
-		waits = append(waits, wait)
-	}
-	require.Equal(t, []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 30 * time.Second, 30 * time.Second}, waits)
-
-	// A healthy lookup waits the full interval and resets the backoff.
-	wait, retry := nextLookup(true, retry, cfg)
-	require.Equal(t, 30*time.Second, wait)
-	require.Equal(t, 5*time.Second, retry)
-}
-
 func TestRegistryEnv(t *testing.T) {
 	newEnvRegistry := func(env map[string]string) (*registry, *config) {
 		cfg := defaultConfig()
