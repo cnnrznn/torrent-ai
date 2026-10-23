@@ -186,15 +186,13 @@ sequence, and notes on exposing the peer port (TCP and UDP) for
 incoming connections. **Milestone:** the Phase 2 restart test, run as
 a pod replacement in a local cluster (kind).
 
-## Decisions to make before starting
+## Decisions
 
-1. **Subcommands in one binary** (recommended) or a separate
-   `torrentaid` binary.
-2. **API access:** unix socket by default with optional TCP and a token
-   (recommended), or TCP only.
-3. **Per-torrent metric attributes** on by default (recommended for up
-   to a few hundred torrents), or aggregated by default.
-4. **Seeding default:** seed until removed (recommended), or stop at a
-   ratio or time limit.
-5. **Pyroscope auth:** whether your server needs basic auth or a
-   tenant header, so the uploader supports it from the start.
+1. **Subcommands in one binary**, not a separate `torrentaid`.
+2. **API access:** a unix socket by default, with optional TCP and a
+   bearer token.
+3. **Per-torrent metric attributes** on by default, with a flag to
+   aggregate.
+4. **Seeding:** seed until removed; ratio and time limits are optional.
+5. **Pyroscope auth:** still open. The uploader will support both basic
+   auth and a tenant header (`X-Scope-OrgID`), configured by flag.
