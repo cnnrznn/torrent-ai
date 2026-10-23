@@ -98,6 +98,7 @@ func TestUDPAnnounce(t *testing.T) {
 		require.EqualValues(t, 42, binary.BigEndian.Uint64(got[64:72]))
 		require.EqualValues(t, 2, binary.BigEndian.Uint32(got[80:84]))
 		require.EqualValues(t, 6881, binary.BigEndian.Uint16(got[96:98]))
+		require.Equal(t, int32(-1), int32(binary.BigEndian.Uint32(got[92:96])), "num_want defaults to -1")
 	})
 
 	t.Run("retries after a lost packet", func(t *testing.T) {

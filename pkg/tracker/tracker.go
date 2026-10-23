@@ -38,6 +38,9 @@ type Request struct {
 	Downloaded int
 	Left       int
 	Event      Event
+	// NumWant is how many peers to ask for. Zero leaves it to the
+	// tracker (BEP 15 sends -1 for that).
+	NumWant int
 }
 
 type Response struct {
@@ -50,6 +53,7 @@ type options struct {
 	httpClient http.Client
 	udpTimeout time.Duration
 	udpRetries int
+	udpConnTTL time.Duration
 }
 
 type Option func(*options)
@@ -68,12 +72,27 @@ func WithHTTPClient(c http.Client) Option {
 	}
 }
 
+// WithHTTPTimeout bounds each HTTP announce.
+func WithHTTPTimeout(d time.Duration) Option {
+	return func(o *options) {
+		o.httpClient.Timeout = d
+	}
+}
+
 // WithUDPRetries sets the UDP timeout schedule: the n-th attempt waits
 // base * 2^n, for n up to retries. BEP 15 specifies 15s and 8.
 func WithUDPRetries(base time.Duration, retries int) Option {
 	return func(o *options) {
 		o.udpTimeout = base
 		o.udpRetries = retries
+	}
+}
+
+// WithUDPConnectionIDLifetime sets how long a UDP connection ID is
+// reused before connecting again. BEP 15 specifies one minute.
+func WithUDPConnectionIDLifetime(d time.Duration) Option {
+	return func(o *options) {
+		o.udpConnTTL = d
 	}
 }
 
@@ -106,6 +125,7 @@ func New(announce string, opts ...Option) (Tracker, error) {
 		},
 		udpTimeout: 15 * time.Second,
 		udpRetries: 8,
+		udpConnTTL: time.Minute,
 	}
 	for _, opt := range opts {
 		opt(&o)
@@ -118,7 +138,7 @@ func New(announce string, opts ...Option) (Tracker, error) {
 		if a.Port() == "" {
 			return nil, fmt.Errorf("udp tracker %q has no port", announce)
 		}
-		return &udpTracker{host: a.Host, timeout: o.udpTimeout, retries: o.udpRetries, log: o.log}, nil
+		return &udpTracker{host: a.Host, timeout: o.udpTimeout, retries: o.udpRetries, connTTL: o.udpConnTTL, log: o.log}, nil
 	}
 	return nil, fmt.Errorf("unsupported tracker scheme %q", a.Scheme)
 }

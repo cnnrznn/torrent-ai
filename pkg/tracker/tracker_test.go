@@ -36,6 +36,7 @@ func TestAnnounce(t *testing.T) {
 		Port:     6881,
 		Left:     1000,
 		Event:    EventStarted,
+		NumWant:  80,
 	})
 	require.NoError(t, err)
 
@@ -44,6 +45,7 @@ func TestAnnounce(t *testing.T) {
 	require.Equal(t, "1000", got.Get("left"))
 	require.Equal(t, "started", got.Get("event"))
 	require.Equal(t, "abc", got.Get("passkey"))
+	require.Equal(t, "80", got.Get("numwant"))
 
 	require.Equal(t, 30*time.Minute, res.Interval)
 	require.Equal(t, []netip.AddrPort{

@@ -18,15 +18,13 @@ const (
 	actionConnect  = 0
 	actionAnnounce = 1
 	actionError    = 3
-
-	// connectionIDLifetime is how long a connection ID may be reused.
-	connectionIDLifetime = time.Minute
 )
 
 type udpTracker struct {
 	host    string
 	timeout time.Duration
 	retries int
+	connTTL time.Duration
 	log     *slog.Logger
 }
 
@@ -52,7 +50,7 @@ func (t *udpTracker) Announce(ctx context.Context, r Request) (*Response, error)
 	for n := 0; n <= t.retries; n++ {
 		timeout := t.timeout << n
 
-		if connAt.IsZero() || time.Since(connAt) > connectionIDLifetime {
+		if connAt.IsZero() || time.Since(connAt) > t.connTTL {
 			t.log.Debug("udp tracker connect", "host", t.host, "attempt", n, "timeout", timeout)
 			connID, err = t.connect(conn, timeout)
 			if errors.Is(err, errTimeout) && ctx.Err() == nil {
@@ -110,7 +108,11 @@ func (t *udpTracker) announce(conn net.Conn, connID uint64, r Request, timeout t
 	req = binary.BigEndian.AppendUint32(req, udpEvent(r.Event))
 	req = binary.BigEndian.AppendUint32(req, 0)                  // IP: use the sender's
 	req = binary.BigEndian.AppendUint32(req, newTransactionID()) // key
-	req = binary.BigEndian.AppendUint32(req, ^uint32(0))         // num_want: default
+	numWant := int32(-1)                                         // the tracker's default
+	if r.NumWant > 0 {
+		numWant = int32(r.NumWant)
+	}
+	req = binary.BigEndian.AppendUint32(req, uint32(numWant))
 	req = binary.BigEndian.AppendUint16(req, uint16(r.Port))
 
 	res, err := roundTrip(conn, req, actionAnnounce, tx, timeout)

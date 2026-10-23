@@ -41,6 +41,9 @@ func (t *httpTracker) Announce(
 	if r.Event != EventNone {
 		q.Set("event", string(r.Event))
 	}
+	if r.NumWant > 0 {
+		q.Set("numwant", fmt.Sprintf("%d", r.NumWant))
+	}
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
