@@ -1,11 +1,12 @@
 package tracker
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"time"
 
@@ -18,6 +19,17 @@ type Tracker struct {
 	client   http.Client
 }
 
+// Event is the reason for an announce. The zero value is a regular
+// announce.
+type Event string
+
+const (
+	EventNone      Event = ""
+	EventStarted   Event = "started"
+	EventCompleted Event = "completed"
+	EventStopped   Event = "stopped"
+)
+
 type Request struct {
 	InfoHash   id.Hash
 	PeerID     id.Hash
@@ -25,11 +37,12 @@ type Request struct {
 	Uploaded   int
 	Downloaded int
 	Left       int
+	Event      Event
 }
 
 type Response struct {
 	Interval time.Duration
-	Peers    []net.Addr
+	Peers    []netip.AddrPort
 }
 
 type Option func(*Tracker)
@@ -61,25 +74,30 @@ func New(announce string, opts ...Option) (*Tracker, error) {
 	return tracker, nil
 }
 
-// Get runs a tracker GET request over HTTP and returns the
+// Announce runs a tracker GET request over HTTP and returns the
 // Go Response struct.
-func (t *Tracker) Get(
+func (t *Tracker) Announce(
+	ctx context.Context,
 	r Request,
 ) (
 	*Response,
 	error,
 ) {
 	u := t.announce
-	q := url.Values{}
+	q := u.Query()
 	q.Set("info_hash", r.InfoHash.String())
 	q.Set("peer_id", r.PeerID.String())
 	q.Set("port", fmt.Sprintf("%d", r.Port))
 	q.Set("uploaded", fmt.Sprintf("%d", r.Uploaded))
 	q.Set("downloaded", fmt.Sprintf("%d", r.Downloaded))
+	q.Set("left", fmt.Sprintf("%d", r.Left))
 	q.Set("compact", "1")
+	if r.Event != EventNone {
+		q.Set("event", string(r.Event))
+	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +107,7 @@ func (t *Tracker) Get(
 	}
 	defer res.Body.Close()
 
-	bs, err := io.ReadAll(res.Body)
+	bs, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -123,20 +141,32 @@ func parseResponse(bs []byte) (*Response, error) {
 		return nil, err
 	}
 
-	var peers []net.Addr
-
-	for i := 0; i < len(peersStr); i += 6 {
-		bs := []byte(peersStr[i : i+6])
-		ip := net.IP(bs[:4])
-		port := binary.BigEndian.Uint16(bs[4:])
-		peers = append(peers, &net.TCPAddr{
-			IP:   ip,
-			Port: int(port),
-		})
+	peers, err := ParseCompactPeers(peersStr)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Response{
 		Interval: time.Duration(interval) * time.Second,
 		Peers:    peers,
 	}, nil
+}
+
+// ParseCompactPeers parses a string of 6-byte IPv4 address and port
+// pairs.
+func ParseCompactPeers(s string) ([]netip.AddrPort, error) {
+	if len(s)%6 != 0 {
+		return nil, fmt.Errorf("compact peer list length %d is not a multiple of 6", len(s))
+	}
+
+	var peers []netip.AddrPort
+
+	for i := 0; i < len(s); i += 6 {
+		bs := []byte(s[i : i+6])
+		ip := netip.AddrFrom4([4]byte(bs[:4]))
+		port := binary.BigEndian.Uint16(bs[4:])
+		peers = append(peers, netip.AddrPortFrom(ip, port))
+	}
+
+	return peers, nil
 }

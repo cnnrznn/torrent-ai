@@ -27,6 +27,15 @@ func (m *Metainfo) InfoHash() id.Hash {
 	return sha1.Sum([]byte(m.rawInfo))
 }
 
+// Length returns the total size of the torrent's content in bytes.
+func (m *Metainfo) Length() int {
+	length := m.info.length
+	for _, f := range m.info.files {
+		length += f.length
+	}
+	return length
+}
+
 func (m *Metainfo) String() string {
 	var b strings.Builder
 

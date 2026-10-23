@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -25,13 +26,14 @@ func main() {
 		panic(err)
 	}
 
-	tResp, err := t.Get(tracker.Request{
+	tResp, err := t.Announce(context.Background(), tracker.Request{
 		PeerID:     peerID,
 		Port:       6881,
 		InfoHash:   m.InfoHash(),
 		Uploaded:   0,
 		Downloaded: 0,
-		Left:       0,
+		Left:       m.Length(),
+		Event:      tracker.EventStarted,
 	})
 	if err != nil {
 		panic(err)
