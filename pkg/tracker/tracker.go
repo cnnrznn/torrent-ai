@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cnnrznn/torrent-scratch/pkg/bencoding"
+	"github.com/cnnrznn/torrent-scratch/pkg/id"
 )
 
 type Tracker struct {
@@ -18,8 +19,8 @@ type Tracker struct {
 }
 
 type Request struct {
-	InfoHash   string
-	PeerID     string
+	InfoHash   id.Hash
+	PeerID     id.Hash
 	Port       int
 	Uploaded   int
 	Downloaded int
@@ -70,8 +71,8 @@ func (t *Tracker) Get(
 ) {
 	u := t.announce
 	q := url.Values{}
-	q.Set("info_hash", r.InfoHash)
-	q.Set("peer_id", r.PeerID)
+	q.Set("info_hash", r.InfoHash.String())
+	q.Set("peer_id", r.PeerID.String())
 	q.Set("port", fmt.Sprintf("%d", r.Port))
 	q.Set("uploaded", fmt.Sprintf("%d", r.Uploaded))
 	q.Set("downloaded", fmt.Sprintf("%d", r.Downloaded))

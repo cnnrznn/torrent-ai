@@ -1,16 +1,16 @@
 package main
 
 import (
-	"crypto/rand"
 	"fmt"
 	"os"
 
+	"github.com/cnnrznn/torrent-scratch/pkg/id"
 	"github.com/cnnrznn/torrent-scratch/pkg/metainfo"
 	"github.com/cnnrznn/torrent-scratch/pkg/tracker"
 )
 
 func main() {
-	peerID := genPeerID()
+	peerID := id.NewPeerID()
 
 	bs, err := os.ReadFile(os.Args[1])
 	if err != nil {
@@ -37,11 +37,4 @@ func main() {
 		panic(err)
 	}
 	fmt.Println(tResp)
-}
-
-func genPeerID() string {
-	bs := make([]byte, 20)
-	rand.Read(bs)
-
-	return string(bs)
 }

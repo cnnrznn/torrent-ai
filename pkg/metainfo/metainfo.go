@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/cnnrznn/torrent-scratch/pkg/bencoding"
+	"github.com/cnnrznn/torrent-scratch/pkg/id"
 )
 
 // Metainfo represents the contents of a .torrent file
@@ -22,10 +23,8 @@ func (m *Metainfo) Announce() string {
 	return m.announce
 }
 
-func (m *Metainfo) InfoHash() string {
-	h := sha1.New()
-	h.Write([]byte(m.rawInfo))
-	return string(h.Sum(nil))
+func (m *Metainfo) InfoHash() id.Hash {
+	return sha1.Sum([]byte(m.rawInfo))
 }
 
 func (m *Metainfo) String() string {

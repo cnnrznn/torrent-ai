@@ -1,13 +1,12 @@
 package peer
 
 import (
-	"crypto/rand"
-
+	"github.com/cnnrznn/torrent-scratch/pkg/id"
 	"github.com/cnnrznn/torrent-scratch/pkg/metainfo"
 )
 
 type Peer struct {
-	id   string
+	id   id.Hash
 	port int
 
 	torrent metainfo.Metainfo
@@ -20,16 +19,9 @@ type Peer struct {
 	done chan struct{}
 }
 
-func genPeerID() string {
-	bs := make([]byte, 20)
-	rand.Read(bs)
-
-	return string(bs)
-}
-
 func New(m metainfo.Metainfo) (*Peer, error) {
 	return &Peer{
-		id:      genPeerID(),
+		id:      id.NewPeerID(),
 		torrent: m,
 		port:    6881,
 	}, nil
