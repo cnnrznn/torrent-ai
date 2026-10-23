@@ -2,6 +2,9 @@ package torrent
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -9,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cnnrznn/torrent-scratch/pkg/id"
+	"github.com/cnnrznn/torrent-scratch/pkg/peerwire"
 	"github.com/cnnrznn/torrent-scratch/pkg/swarm"
 )
 
@@ -44,4 +48,13 @@ func TestFetchMetadata(t *testing.T) {
 	leech, _ := startSession(t, ctx, got, dir, seedAddr)
 	waitComplete(t, leech)
 	require.Equal(t, data, readContent(t, dir, got))
+}
+
+func TestFailureReason(t *testing.T) {
+	require.Equal(t, "dial", failureReason(&dialError{errors.New("refused")}))
+	require.Equal(t, "no_ut_metadata", failureReason(peerwire.ErrNoUTMetadata))
+	require.Equal(t, "rejected", failureReason(fmt.Errorf("%w: piece 1", peerwire.ErrMetadataRejected)))
+	require.Equal(t, "timeout", failureReason(context.DeadlineExceeded))
+	require.Equal(t, "closed", failureReason(fmt.Errorf("read: %w", io.EOF)))
+	require.Equal(t, "protocol", failureReason(errors.New("unexpected protocol")))
 }

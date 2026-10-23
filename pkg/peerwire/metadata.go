@@ -25,6 +25,14 @@ const (
 	metadataWindow = 16
 )
 
+// Reasons FetchMetadata can fail because of the peer.
+var (
+	ErrNoExtensions     = errors.New("peer does not support extensions")
+	ErrNoUTMetadata     = errors.New("peer does not support ut_metadata")
+	ErrMetadataRejected = errors.New("peer rejected metadata request")
+	ErrMetadataHash     = errors.New("metadata does not match infohash")
+)
+
 const (
 	MetadataRequest = 0
 	MetadataData    = 1
@@ -81,7 +89,7 @@ func ParseMetadataMsg(b []byte) (MetadataMsg, error) {
 // messages while it runs. It sends our extension handshake itself.
 func FetchMetadata(ctx context.Context, c *Conn, infoHash id.Hash) (string, error) {
 	if !c.Peer.SupportsExtensions() {
-		return "", errors.New("peer does not support extensions")
+		return "", ErrNoExtensions
 	}
 
 	hs := ExtHandshake{M: map[string]int{UTMetadata: UTMetadataID}}
@@ -138,7 +146,7 @@ func FetchMetadata(ctx context.Context, c *Conn, infoHash id.Hash) (string, erro
 			}
 			peerID = h.M[UTMetadata]
 			if peerID == 0 {
-				return "", errors.New("peer does not support ut_metadata")
+				return "", ErrNoUTMetadata
 			}
 			if h.MetadataSize <= 0 || h.MetadataSize > MaxMetadataSize {
 				return "", fmt.Errorf("peer reported metadata size %d", h.MetadataSize)
@@ -157,7 +165,7 @@ func FetchMetadata(ctx context.Context, c *Conn, infoHash id.Hash) (string, erro
 			}
 			switch m.Type {
 			case MetadataReject:
-				return "", fmt.Errorf("peer rejected metadata piece %d", m.Piece)
+				return "", fmt.Errorf("%w: piece %d", ErrMetadataRejected, m.Piece)
 			case MetadataData:
 			default:
 				continue
@@ -179,7 +187,7 @@ func FetchMetadata(ctx context.Context, c *Conn, infoHash id.Hash) (string, erro
 
 			if received == len(got) {
 				if sha1.Sum(data) != infoHash {
-					return "", errors.New("metadata does not match infohash")
+					return "", ErrMetadataHash
 				}
 				return string(data), nil
 			}

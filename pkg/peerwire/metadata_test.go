@@ -107,7 +107,7 @@ func TestFetchMetadata(t *testing.T) {
 				m.Data[0] ^= 1
 			}
 		})
-		require.ErrorContains(t, err, "does not match infohash")
+		require.ErrorIs(t, err, ErrMetadataHash)
 	})
 
 	t.Run("fails when the peer rejects a piece", func(t *testing.T) {
@@ -116,7 +116,7 @@ func TestFetchMetadata(t *testing.T) {
 				*m = MetadataMsg{Type: MetadataReject, Piece: 1}
 			}
 		})
-		require.ErrorContains(t, err, "rejected")
+		require.ErrorIs(t, err, ErrMetadataRejected)
 	})
 
 	t.Run("rejects a short piece", func(t *testing.T) {
