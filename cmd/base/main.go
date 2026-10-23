@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,17 +21,6 @@ import (
 	"github.com/cnnrznn/torrent-ai/pkg/torrent"
 	"github.com/cnnrznn/torrent-ai/pkg/tracker"
 )
-
-// dhtInterval is how often the DHT lookup for the torrent repeats.
-const dhtInterval = 5 * time.Minute
-
-type config struct {
-	dir     string
-	port    int
-	seed    bool
-	dht     bool
-	timeout time.Duration
-}
 
 // Exit codes.
 const (
@@ -44,31 +34,35 @@ const (
 var errTimeout = errors.New("timeout")
 
 func main() {
-	var cfg config
-	flag.StringVar(&cfg.dir, "o", ".", "directory to download into")
-	flag.IntVar(&cfg.port, "port", 6881, "TCP port for peers, and UDP port for the DHT (0 = pick a free one)")
-	flag.BoolVar(&cfg.seed, "seed", false, "keep seeding after the download completes")
-	flag.BoolVar(&cfg.dht, "dht", true, "find peers through the DHT")
-	flag.DurationVar(&cfg.timeout, "timeout", 0, "give up after this long, exiting with code 3 (0 = no limit)")
-	verbose := flag.Bool("v", false, "debug logging for every component (same as -debug=all)")
-	debug := flag.String("debug", "", "comma-separated components to debug-log: all,"+strings.Join(components, ","))
-	logFormat := flag.String("log-format", "text", "log format: text or json")
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: %s [flags] <file.torrent | magnet:?...>\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "exit codes: 0 complete, 1 error, 2 usage, 3 timeout, 130 interrupted\n")
-		flag.PrintDefaults()
-	}
-	flag.Parse()
-	if flag.NArg() != 1 {
-		flag.Usage()
+	cfg := defaultConfig()
+	r := newRegistry(filepath.Base(os.Args[0]), "<file.torrent | magnet:?...>")
+	registerFlags(r, &cfg)
+	r.fs.SetOutput(os.Stderr)
+	r.fs.Usage = func() { r.printUsage(os.Stderr) }
+
+	if err := r.parse(os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(exitComplete)
+		}
+		fmt.Fprintf(os.Stderr, "%v\nrun with -h for help\n", err)
 		os.Exit(exitUsage)
 	}
+	if r.fs.NArg() != 1 {
+		r.printUsage(os.Stderr)
+		os.Exit(exitUsage)
+	}
+	if err := cfg.validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\nrun with -h for help\n", err)
+		os.Exit(exitUsage)
+	}
+	cfg.finish()
+	target := r.fs.Arg(0)
 
-	debugComponents := strings.Split(*debug, ",")
-	if *verbose {
+	debugComponents := strings.Split(cfg.debug, ",")
+	if cfg.verbose {
 		debugComponents = append(debugComponents, "all")
 	}
-	log, err := newLogger(os.Stderr, *logFormat, debugComponents)
+	log, err := newLogger(os.Stderr, cfg.logFormat, debugComponents)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(exitUsage)
@@ -83,17 +77,14 @@ func main() {
 		defer cancel()
 	}
 
-	mainLog.Info("starting",
-		"target", flag.Arg(0),
-		"dir", cfg.dir,
-		"port", cfg.port,
-		"dht", cfg.dht,
-		"seed", cfg.seed,
-		"timeout", cfg.timeout,
-	)
+	mainLog.Info("starting", "target", target)
+	mainLog.Info("config", r.values()...)
+	for _, o := range r.specOverrides() {
+		mainLog.Warn("spec default overridden", "flag", o.name, "value", o.value, "default", o.def, "spec", o.spec)
+	}
 
 	start := time.Now()
-	err = run(ctx, log, flag.Arg(0), cfg)
+	err = run(ctx, log, target, cfg)
 	elapsed := time.Since(start).Round(time.Millisecond)
 
 	switch {
@@ -120,14 +111,19 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 	trackerLog := log.With("component", compTracker)
 
 	peerID := id.NewPeerID()
-	sw := swarm.New(swarm.Config{MaxPeers: 50})
+	sw := swarm.New(cfg.swarm)
+
+	direct, err := resolvePeers(cfg.peers)
+	if err != nil {
+		return err
+	}
+	sw.Add(direct...)
 
 	// A .torrent gives us the metainfo up front; a magnet gives only
 	// the infohash and maybe some trackers.
 	var m *metainfo.Metainfo
 	var mag *metainfo.Magnet
 	var infoHash id.Hash
-	var err error
 	if strings.HasPrefix(arg, "magnet:") {
 		if mag, err = metainfo.ParseMagnet(arg); err != nil {
 			return err
@@ -140,6 +136,28 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 		infoHash = m.InfoHash()
 	}
 
+	// Trackers from the torrent or magnet link, unless disabled, plus
+	// any given with -tracker.
+	var trackers []string
+	if cfg.useTrackers {
+		if mag != nil {
+			trackers = append(trackers, mag.Trackers...)
+		} else if m.Announce() != "" {
+			trackers = append(trackers, m.Announce())
+		}
+	}
+	trackers = append(trackers, cfg.trackers...)
+	trackerOpts := []tracker.Option{
+		tracker.WithLogger(trackerLog),
+		tracker.WithHTTPTimeout(cfg.trackerTimeout),
+		tracker.WithUDPRetries(cfg.udpTimeout, cfg.udpRetries),
+		tracker.WithUDPConnectionIDLifetime(cfg.udpConnTTL),
+	}
+
+	if !cfg.useDHT && len(trackers) == 0 && len(direct) == 0 {
+		mainLog.Warn("no peer sources", "hint", "enable -dht or -trackers, or add -tracker or -peer")
+	}
+
 	// Listen first so -port 0 resolves to a real port, which the DHT
 	// then shares. Run closes the listener; this covers early returns.
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.port))
@@ -150,41 +168,45 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 	port := ln.Addr().(*net.TCPAddr).Port
 
 	var node *dht.Server
-	if cfg.dht {
-		node, err = dht.New(dht.Config{Addr: fmt.Sprintf(":%d", port), Logger: log.With("component", compDHT)})
+	if cfg.useDHT {
+		dhtCfg := cfg.dht
+		dhtCfg.Addr = fmt.Sprintf(":%d", port)
+		dhtCfg.Logger = log.With("component", compDHT)
+		node, err = dht.New(dhtCfg)
 		if err != nil {
 			return fmt.Errorf("dht: %w", err)
 		}
 		go node.Run(ctx)
-		go dhtPeers(ctx, log.With("component", compDHT), node, sw, infoHash, port)
+		go dhtPeers(ctx, dhtCfg.Logger, node, sw, infoHash, port, cfg)
 	}
 	mainLog.Info("listening", "port", port, "dht", node != nil)
 
 	if mag != nil {
-		mainLog.Info("fetching metadata", "name", mag.Name, "infohash", infoHash.Hex(), "trackers", len(mag.Trackers))
-		for _, tr := range mag.Trackers {
-			go announce(ctx, trackerLog, sw, tr, tracker.Request{
+		mainLog.Info("fetching metadata", "name", mag.Name, "infohash", infoHash.Hex(), "trackers", len(trackers), "direct_peers", len(direct))
+		for _, tr := range trackers {
+			go announce(ctx, trackerLog, sw, tr, trackerOpts, tracker.Request{
 				InfoHash: infoHash,
 				PeerID:   peerID,
 				Port:     port,
 				// The size is unknown until we have the metadata; any
 				// non-zero value marks us as a leecher.
-				Left:  1,
-				Event: tracker.EventStarted,
+				Left:    1,
+				Event:   tracker.EventStarted,
+				NumWant: cfg.numWant,
 			})
 		}
-		if m, err = torrent.FetchMetadata(ctx, sw, infoHash, peerID, torrent.MetadataConfig{Logger: log.With("component", compMetadata)}); err != nil {
+		metaCfg := cfg.metadata
+		metaCfg.Logger = log.With("component", compMetadata)
+		if m, err = torrent.FetchMetadata(ctx, sw, infoHash, peerID, metaCfg); err != nil {
 			return err
 		}
 	}
 	mainLog.Info("loaded torrent", "name", m.Name(), "size", m.Length(), "pieces", m.NumPieces(), "infohash", infoHash.Hex())
 
-	sessCfg := torrent.Config{
-		Dir:      cfg.dir,
-		PeerID:   peerID,
-		Listener: ln,
-		Logger:   log.With("component", compSession),
-	}
+	sessCfg := cfg.session
+	sessCfg.PeerID = peerID
+	sessCfg.Listener = ln
+	sessCfg.Logger = log.With("component", compSession)
 	if node != nil {
 		sessCfg.DHTPort = port
 		sessCfg.OnPort = node.AddNode
@@ -194,20 +216,23 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 		return err
 	}
 
-	if m.Announce() != "" {
-		go announce(ctx, trackerLog, sw, m.Announce(), tracker.Request{
-			InfoHash: infoHash,
-			PeerID:   peerID,
-			Port:     port,
-			Left:     int(s.Stats().Left),
-			Event:    tracker.EventStarted,
-		})
+	if mag == nil {
+		for _, tr := range trackers {
+			go announce(ctx, trackerLog, sw, tr, trackerOpts, tracker.Request{
+				InfoHash: infoHash,
+				PeerID:   peerID,
+				Port:     port,
+				Left:     int(s.Stats().Left),
+				Event:    tracker.EventStarted,
+				NumWant:  cfg.numWant,
+			})
+		}
 	}
 
 	errc := make(chan error, 1)
 	go func() { errc <- s.Run(ctx) }()
 
-	ticker := time.NewTicker(statusInterval)
+	ticker := time.NewTicker(cfg.statusInterval)
 	defer ticker.Stop()
 
 	phase := "downloading"
@@ -228,19 +253,16 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 			mainLog.Info("seeding", "hint", "interrupt to stop")
 		case <-ticker.C:
 			st := s.Stats()
-			logStatus(mainLog, phase, st, last, sw, node)
+			logStatus(mainLog, phase, st, last, cfg.statusInterval, sw, node)
 			last = st
 		}
 	}
 }
 
-// statusInterval is how often the status line is logged.
-const statusInterval = 5 * time.Second
-
 // logStatus writes the periodic one-line summary of the session.
 // Rates are bytes per second since the previous status line.
-func logStatus(log *slog.Logger, phase string, st, last torrent.Stats, sw *swarm.Swarm, node *dht.Server) {
-	secs := statusInterval.Seconds()
+func logStatus(log *slog.Logger, phase string, st, last torrent.Stats, interval time.Duration, sw *swarm.Swarm, node *dht.Server) {
+	secs := interval.Seconds()
 	attrs := []any{
 		"phase", phase,
 		"pieces", st.Have,
@@ -278,8 +300,21 @@ func fromFile(path string) (*metainfo.Metainfo, error) {
 	return metainfo.New(string(bs))
 }
 
-func announce(ctx context.Context, log *slog.Logger, sw *swarm.Swarm, url string, req tracker.Request) {
-	t, err := tracker.New(url, tracker.WithLogger(log))
+// resolvePeers turns -peer host:port values into addresses.
+func resolvePeers(hosts []string) ([]netip.AddrPort, error) {
+	var addrs []netip.AddrPort
+	for _, h := range hosts {
+		a, err := net.ResolveTCPAddr("tcp", h)
+		if err != nil {
+			return nil, fmt.Errorf("-peer %s: %w", h, err)
+		}
+		addrs = append(addrs, a.AddrPort())
+	}
+	return addrs, nil
+}
+
+func announce(ctx context.Context, log *slog.Logger, sw *swarm.Swarm, url string, opts []tracker.Option, req tracker.Request) {
+	t, err := tracker.New(url, opts...)
 	if err != nil {
 		log.Warn("tracker invalid", "url", tracker.Redact(url), "err", err)
 		return
@@ -298,10 +333,10 @@ func announce(ctx context.Context, log *slog.Logger, sw *swarm.Swarm, url string
 
 // dhtPeers joins the DHT and repeatedly looks up and announces the
 // torrent, feeding the peers it finds into the swarm. It logs a stats
-// line every minute so DHT health is visible without debug logs.
-func dhtPeers(ctx context.Context, log *slog.Logger, node *dht.Server, sw *swarm.Swarm, infoHash id.Hash, port int) {
+// line periodically so DHT health is visible without debug logs.
+func dhtPeers(ctx context.Context, log *slog.Logger, node *dht.Server, sw *swarm.Swarm, infoHash id.Hash, port int, cfg config) {
 	go func() {
-		ticker := time.NewTicker(time.Minute)
+		ticker := time.NewTicker(cfg.dhtStatsInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -315,7 +350,7 @@ func dhtPeers(ctx context.Context, log *slog.Logger, node *dht.Server, sw *swarm
 
 	for {
 		if node.Nodes() == 0 {
-			st, err := node.Bootstrap(ctx, dht.DefaultRouters)
+			st, err := node.Bootstrap(ctx, cfg.dhtRouters)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -341,7 +376,7 @@ func dhtPeers(ctx context.Context, log *slog.Logger, node *dht.Server, sw *swarm
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(dhtInterval):
+		case <-time.After(cfg.dhtInterval):
 		}
 	}
 }
