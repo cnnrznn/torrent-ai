@@ -348,15 +348,21 @@ func dhtPeers(ctx context.Context, log *slog.Logger, node *dht.Server, sw *swarm
 		}
 	}()
 
+	retry := cfg.dhtRetryInterval
 	for {
-		if node.Nodes() == 0 {
+		// A table with fewer than k nodes can't support a useful
+		// lookup, so keep bootstrapping until it fills.
+		if node.Nodes() < cfg.dht.K {
 			st, err := node.Bootstrap(ctx, cfg.dhtRouters)
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				log.Warn("dht bootstrap failed", "err", err, "lookup", st)
-			} else {
+			if ctx.Err() != nil {
+				return
+			}
+			switch {
+			case err != nil:
+				log.Warn("dht bootstrap failed", "err", err, "nodes", node.Nodes(), "lookup", st)
+			case node.Nodes() < cfg.dht.K:
+				log.Warn("dht bootstrap weak", "nodes", node.Nodes(), "want", cfg.dht.K, "lookup", st)
+			default:
 				log.Info("dht bootstrapped", "nodes", node.Nodes(), "lookup", st)
 			}
 		}
@@ -364,21 +370,36 @@ func dhtPeers(ctx context.Context, log *slog.Logger, node *dht.Server, sw *swarm
 		st, err := node.Announce(ctx, infoHash, port, func(peers []netip.AddrPort) {
 			sw.Add(peers...)
 		})
+		if ctx.Err() != nil {
+			return
+		}
+
+		var wait time.Duration
+		wait, retry = nextLookup(node.Nodes() >= cfg.dht.K && err == nil && st.Peers > 0, retry, cfg)
 		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			log.Warn("dht lookup failed", "err", err, "lookup", st)
+			log.Warn("dht lookup failed", "err", err, "lookup", st, "next", wait)
 		} else {
-			log.Info("dht lookup done", "infohash", infoHash.Hex(), "nodes", node.Nodes(), "lookup", st)
+			log.Info("dht lookup done", "infohash", infoHash.Hex(), "nodes", node.Nodes(), "lookup", st, "next", wait)
 		}
 
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(cfg.dhtInterval):
+		case <-time.After(wait):
 		}
 	}
+}
+
+// nextLookup decides how long to wait before the next DHT lookup. A
+// healthy lookup waits the full -dht-interval. Otherwise (too few
+// nodes, an error, or no peers) it retries after retry, doubling the
+// retry each time up to the interval. It returns the wait and the
+// retry to use next time.
+func nextLookup(healthy bool, retry time.Duration, cfg config) (wait, nextRetry time.Duration) {
+	if healthy {
+		return cfg.dhtInterval, cfg.dhtRetryInterval
+	}
+	return retry, min(2*retry, cfg.dhtInterval)
 }
 
 func logDHTStats(log *slog.Logger, st dht.Stats) {

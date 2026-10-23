@@ -39,6 +39,7 @@ type config struct {
 	useDHT           bool
 	dhtRouters       []string
 	dhtInterval      time.Duration
+	dhtRetryInterval time.Duration
 	dhtStatsInterval time.Duration
 
 	swarm    swarm.Config
@@ -63,6 +64,7 @@ func defaultConfig() config {
 		useDHT:           true,
 		dhtRouters:       append([]string(nil), dht.DefaultRouters...),
 		dhtInterval:      5 * time.Minute,
+		dhtRetryInterval: 5 * time.Second,
 		dhtStatsInterval: time.Minute,
 
 		swarm:    swarm.DefaultConfig(),
@@ -135,6 +137,7 @@ func registerFlags(r *registry, cfg *config) {
 	r.boolean(&cfg.useDHT, "dht", "find peers through the DHT (-dht=false to disable)")
 	r.list(&cfg.dhtRouters, "dht-routers", "host:port nodes to bootstrap from; replaces the defaults, repeatable or comma-separated")
 	r.duration(&cfg.dhtInterval, "dht-interval", time.Millisecond, "how often the DHT lookup and announce for the torrent repeats", "")
+	r.duration(&cfg.dhtRetryInterval, "dht-retry-interval", time.Millisecond, "first retry after a weak bootstrap or a lookup that found no peers; doubles up to -dht-interval", "")
 	r.duration(&cfg.dhtStatsInterval, "dht-stats-interval", time.Millisecond, "how often \"dht stats\" is logged", "")
 	r.duration(&cfg.dht.QueryTimeout, "dht-query-timeout", time.Millisecond, "how long a DHT query may go unanswered", "")
 	r.integer(&cfg.dht.K, "dht-k", 1, "bucket size, and nodes a lookup converges on and replies carry", "BEP 5, 8")
