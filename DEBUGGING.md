@@ -39,6 +39,24 @@ Flags that are useful when debugging:
   `-dht-stats-interval`, `-dht-retry-interval`, and short timeouts
   such as `-request-timeout` and `-dht-query-timeout`.
 - Resource limits: `-max-peers`, `-max-requests`, `-max-memory`.
+- Any flag can come from the environment instead: `TORRENT_AI_` plus
+  the flag name in upper case, `-` as `_`. `config from environment`
+  lists which ones did.
+
+### Profiles and traces
+
+When the logs say *what* happened but not *why it's slow*:
+
+- `TORRENT_AI_FLAME=` serves pprof on `localhost:6060`. `go tool pprof
+  -top 'http://localhost:6060/debug/pprof/profile?seconds=10'` shows
+  where CPU goes, `-tags` splits it by component, and `/debug/pprof/heap`
+  shows memory (partial pieces dominate; `-max-memory` caps them).
+  `-flame-cpu-file` holds the CPU profiler for the whole run, so it and
+  the endpoint's CPU profile can't be used together.
+- `TORRENT_AI_OTEL= TORRENT_AI_OTEL_TRACES_EXPORTER=console` prints
+  spans to stdout as JSON, with no collector needed: one trace per run,
+  with bootstrap, lookups, the metadata fetch and its attempts, and a
+  span per peer connection with its bytes and close reason.
 
 A good test torrent is Debian's netinst image. It has a large swarm, and
 SHA-256 sums are published for checking the result. The current
@@ -67,8 +85,14 @@ match on it, not on the text of `err`.
 
 | event | level | keys |
 |---|---|---|
-| `starting` | info | target |
-| `config` | info | every flag's effective value, keyed by flag name |
+| `starting` | info | target, version |
+| `config` | info | every flag's effective value, keyed by flag name (secrets redacted) |
+| `config from environment` | info | flags (set from `TORRENT_AI_*`) |
+| `flame endpoint listening` | info | url, block_rate, mutex_fraction, hint |
+| `flame cpu profile unavailable over http` | warn | reason, hint |
+| `cpu profile written` / `heap profile written` | info | file, hint |
+| `opentelemetry enabled` | info | traces, metrics, logs, endpoint, protocol, service |
+| `opentelemetry shutdown failed` | warn | err |
 | `spec default overridden` | warn | flag, value, default, spec |
 | `no peer sources` | warn | hint (DHT and trackers disabled, no -peer or -tracker) |
 | `listening` | info | port (the real port), dht |

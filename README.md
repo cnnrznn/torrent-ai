@@ -1,10 +1,11 @@
 # torrent-ai
 
-A BitTorrent client written from scratch in Go, with no dependencies
-outside the standard library (testify is used in tests). It downloads
-from `.torrent` files and magnet links, finds peers through HTTP and UDP
-trackers and the Mainline DHT, verifies every piece, resumes interrupted
-downloads and seeds.
+A BitTorrent client written from scratch in Go. The BitTorrent protocol,
+DHT and tracker code use only the standard library; the one runtime
+dependency is the OpenTelemetry SDK, for optional tracing, metrics and
+log export. It downloads from `.torrent` files and magnet links, finds
+peers through HTTP and UDP trackers and the Mainline DHT, verifies every
+piece, resumes interrupted downloads and seeds.
 
 It was built by an AI agent, [Claude Code](https://claude.com/claude-code),
 which also ran, debugged and verified it against real swarms and the live
@@ -150,8 +151,54 @@ size, the DHT's bucket size and token lifetime, UDP tracker retries) are
 tunable too. They default to the spec-defined recommended value, are
 marked as such in `-h`, and log a warning when changed.
 
+Every flag can also be set from the environment as `TORRENT_AI_` plus
+the flag name in upper case, with `-` as `_`: `TORRENT_AI_MAX_PEERS=20`.
+Switches turn on just by being set, so `TORRENT_AI_FLAME=` enables
+profiling. Flags on the command line take precedence.
+
 Ctrl-C shuts down cleanly, and the next run resumes from the verified
 pieces on disk.
+
+## Observability
+
+Both features are off by default and can be switched on from the
+environment, so a deployment can enable them without changing its
+command line.
+
+**Flame graphs.** `TORRENT_AI_FLAME` (or `-flame`) serves Go's standard
+`/debug/pprof` on `localhost:6060`; set it to an address such as `:6060`
+to serve other hosts. Pyroscope, Parca or Grafana Alloy can scrape it
+continuously, or pull a flame graph on demand:
+
+```sh
+TORRENT_AI_FLAME= torrentai 'magnet:?xt=urn:btih:<infohash>'
+go tool pprof -http=: 'http://localhost:6060/debug/pprof/profile?seconds=30'
+```
+
+Goroutines carry a `component` label (session, dht, metadata, tracker),
+so a flame graph can be split by subsystem (`-tagfocus` in pprof).
+`-flame-cpu-file` and `-flame-heap-file` write profiles at exit instead,
+for one-off runs.
+
+**OpenTelemetry.** `TORRENT_AI_OTEL` (or `-otel`) exports traces, metrics
+and logs, over OTLP to a collector by default:
+
+```sh
+TORRENT_AI_OTEL= TORRENT_AI_OTEL_ENDPOINT=http://localhost:4318 \
+  torrentai 'magnet:?xt=urn:btih:<infohash>'
+```
+
+- **Traces:** one trace per run, with spans for tracker announces, DHT
+  bootstrap and lookups, the metadata fetch and each attempt, and the
+  download session with a span per peer connection.
+- **Metrics:** progress, rates, peer counts, dial and hash failures,
+  memory buffered and DHT traffic, 27 instruments in all.
+- **Logs:** the same events as stderr, with the same `-debug` filtering.
+
+Exporters, protocol, endpoint, headers, sampling and resource
+attributes are set with the `-otel-*` flags (`TORRENT_AI_OTEL_*`), or
+with the standard `OTEL_*` variables when a flag is left empty. See
+`torrentai -h`.
 
 ## What's implemented
 
