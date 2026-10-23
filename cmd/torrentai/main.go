@@ -170,6 +170,20 @@ Each takes -h.
 		return exitError
 	}
 
+	uploader, err := cfg.profiling.pyroscope.uploader(log.With("component", compMain))
+	if err != nil {
+		stopProfiling()
+		mainLog.Error("exit", "result", "error", "err", err, "elapsed", time.Duration(0), "code", exitError)
+		return exitError
+	}
+	uploadCtx, stopUploads := context.WithCancel(ctx)
+	uploadsDone := make(chan struct{})
+	if uploader != nil {
+		go func() { uploader.Run(uploadCtx); close(uploadsDone) }()
+	} else {
+		close(uploadsDone)
+	}
+
 	if cfg.otel.enabled {
 		mainLog.Info("opentelemetry enabled",
 			"traces", envOr("OTEL_TRACES_EXPORTER", "otlp"),
@@ -194,6 +208,9 @@ Each takes -h.
 		span.SetStatus(codes.Error, err.Error())
 	}
 	span.End()
+	// The final profile upload, then profile files.
+	stopUploads()
+	<-uploadsDone
 	stopProfiling()
 
 	// Log the exit before flushing telemetry, so the exit line is

@@ -36,6 +36,7 @@ type otelConfig struct {
 	protocol        string
 	headers         string
 	insecure        string
+	caFile          string
 	tracesExporter  string
 	metricsExporter string
 	logsExporter    string
@@ -57,6 +58,7 @@ func (c otelConfig) env() map[string]string {
 	set("OTEL_EXPORTER_OTLP_PROTOCOL", c.protocol)
 	set("OTEL_EXPORTER_OTLP_HEADERS", c.headers)
 	set("OTEL_EXPORTER_OTLP_INSECURE", c.insecure)
+	set("OTEL_EXPORTER_OTLP_CERTIFICATE", c.caFile)
 	set("OTEL_TRACES_EXPORTER", c.tracesExporter)
 	set("OTEL_METRICS_EXPORTER", c.metricsExporter)
 	set("OTEL_LOGS_EXPORTER", c.logsExporter)

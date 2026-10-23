@@ -13,6 +13,8 @@ import (
 	"runtime/pprof"
 	"strings"
 	"time"
+
+	"github.com/cnnrznn/torrent-ai/pkg/pyroscope"
 )
 
 // defaultFlameAddr is where -flame serves profiles when no address is
@@ -20,13 +22,56 @@ import (
 // other internals, so serving them to other hosts is opt-in.
 const defaultFlameAddr = "localhost:6060"
 
-// profiling holds the -flame settings.
+// profiling holds the -flame and -pyroscope settings.
 type profiling struct {
 	addr          string // pprof HTTP address; empty means off
 	cpuFile       string
 	heapFile      string
 	blockRate     int
 	mutexFraction int
+
+	pyroscope pyroscopeConfig
+}
+
+// pyroscopeConfig holds the -pyroscope flags; uploads run when url is
+// set.
+type pyroscopeConfig struct {
+	url                string
+	app                string
+	labels             []string // key=value
+	interval           time.Duration
+	user, password     string
+	tenant             string
+	caFile             string
+	insecureSkipVerify bool
+}
+
+// uploader builds the Pyroscope uploader, or returns nil if no URL is
+// set.
+func (c pyroscopeConfig) uploader(log *slog.Logger) (*pyroscope.Uploader, error) {
+	if c.url == "" {
+		return nil, nil
+	}
+	labels := pyroscope.DefaultLabels(version())
+	for _, kv := range c.labels {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			return nil, fmt.Errorf("-pyroscope-labels: %q is not key=value", kv)
+		}
+		labels[k] = v
+	}
+	return pyroscope.New(pyroscope.Config{
+		URL:                c.url,
+		App:                c.app,
+		Labels:             labels,
+		Interval:           c.interval,
+		User:               c.user,
+		Password:           c.password,
+		TenantID:           c.tenant,
+		CAFile:             c.caFile,
+		InsecureSkipVerify: c.insecureSkipVerify,
+		Logger:             log,
+	})
 }
 
 // switchAddr is a flag that is either off or an address. Given no value

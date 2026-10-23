@@ -81,11 +81,12 @@ func defaultConfig() config {
 		dhtStatsInterval: time.Minute,
 		dhtSaveInterval:  5 * time.Minute,
 
-		daemon:   daemonConfig{stateDir: defaultStateDir()},
-		swarm:    swarm.DefaultConfig(),
-		session:  torrent.DefaultConfig(),
-		metadata: torrent.DefaultMetadataConfig(),
-		dht:      dht.DefaultConfig(),
+		daemon:    daemonConfig{stateDir: defaultStateDir()},
+		profiling: profiling{pyroscope: pyroscopeConfig{app: "torrentai", interval: time.Minute}},
+		swarm:     swarm.DefaultConfig(),
+		session:   torrent.DefaultConfig(),
+		metadata:  torrent.DefaultMetadataConfig(),
+		dht:       dht.DefaultConfig(),
 	}
 	cfg.session.Conn = peerwire.DefaultOptions()
 	cfg.session.Metadata = peerwire.DefaultMetadataOptions()
@@ -119,6 +120,17 @@ func registerFlags(r *registry, cfg *config) {
 	r.str(&cfg.profiling.heapFile, "flame-heap-file", "write a heap profile to this file at exit")
 	r.integer(&cfg.profiling.blockRate, "flame-block-rate", 0, "record blocking events lasting this many nanoseconds or more (runtime.SetBlockProfileRate); 0 is off, 1 records all", "")
 	r.integer(&cfg.profiling.mutexFraction, "flame-mutex-fraction", 0, "sample 1 in this many mutex contention events (runtime.SetMutexProfileFraction); 0 is off", "")
+	py := &cfg.profiling.pyroscope
+	r.str(&py.url, "pyroscope-url", "upload continuous CPU and heap profiles to this Pyroscope server or Grafana Cloud Profiles URL; setting it turns uploads on. http:// or https:// decides TLS")
+	r.str(&py.app, "pyroscope-app", "application name in Pyroscope; it appends the profile type (torrentai.cpu, ...)")
+	r.list(&py.labels, "pyroscope-labels", "extra key=value labels on every profile, e.g. env=homelab; hostname, version and go_version are added")
+	r.duration(&py.interval, "pyroscope-interval", time.Second, "length of each CPU profile, and how often profiles are uploaded", "")
+	r.str(&py.user, "pyroscope-user", "basic auth user; for Grafana Cloud, the stack's profiles instance ID")
+	r.str(&py.password, "pyroscope-password", "basic auth password; for Grafana Cloud, an access policy token with profiles:write. Never logged")
+	r.secret("pyroscope-password")
+	r.str(&py.tenant, "pyroscope-tenant", "X-Scope-OrgID tenant header, for multi-tenant servers")
+	r.str(&py.caFile, "pyroscope-ca-file", "PEM CA certificate to trust, for a self-signed server")
+	r.boolean(&py.insecureSkipVerify, "pyroscope-insecure-skip-verify", "don't verify the server's TLS certificate (logs a warning); prefer -pyroscope-ca-file")
 
 	r.group("OpenTelemetry")
 	r.boolean(&cfg.otel.enabled, "otel", "export traces, metrics and logs with OpenTelemetry; TORRENT_AI_OTEL turns it on just by being set. The flags below map to the standard OTEL_* variables, which apply when a flag is left empty")
@@ -127,6 +139,7 @@ func registerFlags(r *registry, cfg *config) {
 	r.str(&cfg.otel.headers, "otel-headers", "OTLP headers as key=value,key=value, e.g. for an API key; never logged (OTEL_EXPORTER_OTLP_HEADERS)")
 	r.secret("otel-headers")
 	r.str(&cfg.otel.insecure, "otel-insecure", "true to use OTLP over gRPC without TLS (OTEL_EXPORTER_OTLP_INSECURE)")
+	r.str(&cfg.otel.caFile, "otel-ca-file", "PEM CA certificate to trust for the OTLP endpoint, e.g. a self-signed homelab collector (OTEL_EXPORTER_OTLP_CERTIFICATE)")
 	r.str(&cfg.otel.tracesExporter, "otel-traces-exporter", "otlp, console or none (OTEL_TRACES_EXPORTER; default otlp)")
 	r.str(&cfg.otel.metricsExporter, "otel-metrics-exporter", "otlp, prometheus, console or none (OTEL_METRICS_EXPORTER; default otlp)")
 	r.str(&cfg.otel.logsExporter, "otel-logs-exporter", "otlp, console or none (OTEL_LOGS_EXPORTER; default otlp)")
