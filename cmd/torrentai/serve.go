@@ -14,6 +14,7 @@ import (
 	"github.com/cnnrznn/torrent-ai/pkg/daemon"
 	"github.com/cnnrznn/torrent-ai/pkg/dht"
 	"github.com/cnnrznn/torrent-ai/pkg/id"
+	"github.com/cnnrznn/torrent-ai/pkg/peersource"
 	"github.com/cnnrznn/torrent-ai/pkg/tracker"
 )
 
@@ -115,7 +116,10 @@ func serve(ctx context.Context, log *slog.Logger, cfg config) error {
 			tracker.WithUDPRetries(cfg.udpTimeout, cfg.udpRetries),
 			tracker.WithUDPConnectionIDLifetime(cfg.udpConnTTL),
 		},
-		NumWant:   cfg.numWant,
+		NumWant: cfg.numWant,
+		TrackerLoop: peersource.TrackerLoopConfig{
+			MinInterval: cfg.trackerMinWait,
+		},
 		MaxPeers:  cfg.swarm.MaxPeers,
 		MaxMemory: cfg.session.MaxMemory,
 		Store:     store,

@@ -105,3 +105,94 @@ func nextLookup(healthy bool, retry time.Duration, cfg DHTConfig) (wait, nextRet
 	}
 	return retry, min(2*retry, cfg.Interval)
 }
+
+// TrackerLoopConfig tunes TrackerLoop.
+type TrackerLoopConfig struct {
+	// MinInterval is the shortest wait between announces, whatever the
+	// tracker asks for.
+	MinInterval time.Duration
+	// DefaultInterval is used when the tracker gives none.
+	DefaultInterval time.Duration
+}
+
+// Progress is what a torrent reports to its trackers.
+type Progress struct {
+	Uploaded, Downloaded, Left int
+}
+
+// TrackerLoop keeps announcing to the tracker at url for as long as ctx
+// lives, for torrents that outlive one download: a started announce,
+// then regular ones at the tracker's interval with current progress,
+// completed when complete is closed, and stopped when ctx ends. Failed
+// announces retry after MinInterval, doubling up to the interval.
+func TrackerLoop(ctx context.Context, log *slog.Logger, sw *swarm.Swarm, url string, opts []tracker.Option, base tracker.Request, progress func() Progress, complete <-chan struct{}, cfg TrackerLoopConfig) {
+	if cfg.MinInterval <= 0 {
+		cfg.MinInterval = time.Minute
+	}
+	if cfg.DefaultInterval <= 0 {
+		cfg.DefaultInterval = 30 * time.Minute
+	}
+
+	t, err := tracker.New(url, opts...)
+	if err != nil {
+		log.Warn("tracker invalid", "url", tracker.Redact(url), "err", err)
+		return
+	}
+	redacted := tracker.Redact(url)
+
+	announce := func(ctx context.Context, event tracker.Event) (time.Duration, error) {
+		req := base
+		p := progress()
+		req.Uploaded, req.Downloaded, req.Left = p.Uploaded, p.Downloaded, p.Left
+		req.Event = event
+		start := time.Now()
+		res, err := t.Announce(ctx, req)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Warn("tracker announce failed", "url", redacted, "event", event, "err", err, "dur", time.Since(start).Round(time.Millisecond))
+			}
+			return 0, err
+		}
+		log.Info("tracker announce done", "url", redacted, "event", event, "peers", len(res.Peers), "interval", res.Interval, "dur", time.Since(start).Round(time.Millisecond))
+		sw.Add(res.Peers...)
+		interval := res.Interval
+		if interval <= 0 {
+			interval = cfg.DefaultInterval
+		}
+		return max(interval, cfg.MinInterval), nil
+	}
+
+	defer func() {
+		// Tell the tracker we're leaving, briefly, even though ctx is
+		// done.
+		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		announce(stopCtx, tracker.EventStopped)
+	}()
+
+	event := tracker.EventStarted
+	retry := cfg.MinInterval
+	for {
+		wait, err := announce(ctx, event)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			wait, retry = retry, min(2*retry, cfg.DefaultInterval)
+		} else {
+			event, retry = tracker.EventNone, cfg.MinInterval
+		}
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-complete:
+			timer.Stop()
+			complete = nil // announce completed once
+			event = tracker.EventCompleted
+		case <-timer.C:
+		}
+	}
+}

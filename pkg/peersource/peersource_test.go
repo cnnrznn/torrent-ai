@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,4 +88,53 @@ func TestDHT(t *testing.T) {
 			}
 		}
 	}, 10*time.Second, 20*time.Millisecond)
+}
+
+func TestTrackerLoop(t *testing.T) {
+	type call struct {
+		event, left string
+	}
+	calls := make(chan call, 20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		calls <- call{q.Get("event"), q.Get("left")}
+		w.Write([]byte(bencoding.EncodeDictionary(map[string]string{
+			"interval": bencoding.EncodeInteger(1),
+			"peers":    bencoding.EncodeString(""),
+		})))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var left atomic.Int64
+	left.Store(1000)
+	complete := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		TrackerLoop(ctx, discard, swarm.New(swarm.Config{}), srv.URL+"/announce", nil,
+			tracker.Request{InfoHash: id.Random(), PeerID: id.NewPeerID()},
+			func() Progress { return Progress{Left: int(left.Load())} },
+			complete, TrackerLoopConfig{MinInterval: 10 * time.Millisecond})
+		close(done)
+	}()
+
+	require.Equal(t, call{"started", "1000"}, <-calls)
+	require.Equal(t, call{"", "1000"}, <-calls, "re-announces on the interval")
+
+	left.Store(0)
+	close(complete)
+	for c := range calls {
+		if c.event == "completed" {
+			require.Equal(t, "0", c.left)
+			break
+		}
+	}
+
+	cancel()
+	<-done
+	var last call
+	for len(calls) > 0 {
+		last = <-calls
+	}
+	require.Equal(t, "stopped", last.event, "says goodbye on the way out")
 }

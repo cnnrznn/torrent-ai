@@ -5,8 +5,12 @@ import (
 	"crypto/sha1"
 	"math/rand/v2"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -199,4 +203,52 @@ func TestManagerAddAndRemove(t *testing.T) {
 		require.Equal(t, StateMetadata, st.State)
 		require.NoError(t, n.m.Remove(b.meta.InfoHash(), true))
 	})
+}
+
+func TestTrackerEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events := make(chan string, 20)
+	var lefts sync.Map
+	tr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		events <- q.Get("event")
+		lefts.Store(q.Get("event"), q.Get("left"))
+		w.Write([]byte(bencoding.EncodeDictionary(map[string]string{
+			"interval": bencoding.EncodeInteger(3600),
+			"peers":    bencoding.EncodeString(""),
+		})))
+	}))
+	defer tr.Close()
+
+	n := startNode(t, ctx, nil)
+	a := makeTorrent(t, "a.bin", 40_000, 16*1024, 11)
+	seedDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(seedDir, "a.bin"), a.data, 0o644))
+	seeder := startNode(t, ctx, nil)
+	_, err := seeder.m.Add(Source{Torrent: a.file, Dir: seedDir})
+	require.NoError(t, err)
+	waitState(t, seeder.m, a, StateSeeding)
+
+	_, err = n.m.Add(Source{Magnet: a.magnet(), Dir: t.TempDir(), Trackers: []string{tr.URL + "/announce"}, Peers: []netip.AddrPort{seeder.addr.AddrPort()}})
+	require.NoError(t, err)
+	waitState(t, n.m, a, StateSeeding)
+
+	next := func() string {
+		select {
+		case e := <-events:
+			return e
+		case <-time.After(10 * time.Second):
+			t.Fatal("no announce")
+			return ""
+		}
+	}
+	require.Equal(t, "started", next())
+	require.Equal(t, "completed", next())
+	left, _ := lefts.Load("completed")
+	require.Equal(t, "0", left)
+
+	require.NoError(t, n.m.Remove(a.meta.InfoHash(), false))
+	require.Equal(t, "stopped", next())
 }

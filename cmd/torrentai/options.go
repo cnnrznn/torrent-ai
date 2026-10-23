@@ -33,6 +33,7 @@ type config struct {
 	trackers       []string
 	trackerTimeout time.Duration
 	numWant        int
+	trackerMinWait time.Duration
 	udpTimeout     time.Duration
 	udpRetries     int
 	udpConnTTL     time.Duration
@@ -62,6 +63,7 @@ func defaultConfig() config {
 
 		useTrackers:    true,
 		trackerTimeout: 10 * time.Second,
+		trackerMinWait: time.Minute,
 		udpTimeout:     15 * time.Second,
 		udpRetries:     8,
 		udpConnTTL:     time.Minute,
@@ -158,6 +160,7 @@ func registerFlags(r *registry, cfg *config) {
 	r.list(&cfg.trackers, "tracker", "extra announce URL (http, https or udp); repeatable or comma-separated")
 	r.duration(&cfg.trackerTimeout, "tracker-timeout", time.Millisecond, "how long an HTTP announce may take", "")
 	r.integer(&cfg.numWant, "tracker-numwant", 0, "peers to ask each tracker for; 0 leaves it to the tracker", "")
+	r.duration(&cfg.trackerMinWait, "tracker-min-interval", time.Millisecond, "serve: shortest wait between re-announces, whatever interval a tracker asks for", "")
 	r.duration(&cfg.udpTimeout, "udp-tracker-timeout", time.Millisecond, "first UDP tracker timeout; attempt n waits this times 2^n", "BEP 15, 15s")
 	r.integer(&cfg.udpRetries, "udp-tracker-retries", 0, "UDP tracker retries after the first attempt", "BEP 15, 8")
 	r.duration(&cfg.udpConnTTL, "udp-connection-id-lifetime", time.Millisecond, "how long a UDP tracker connection ID is reused", "BEP 15, 1 minute")

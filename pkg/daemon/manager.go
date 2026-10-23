@@ -50,6 +50,8 @@ type Config struct {
 	// NumWant is how many peers to ask each tracker for; 0 leaves it
 	// to the tracker.
 	NumWant int
+	// TrackerLoop tunes the re-announce schedule.
+	TrackerLoop peersource.TrackerLoopConfig
 
 	// MaxPeers caps peer connections across all torrents; 0 means no
 	// shared cap. Swarm.MaxPeers still caps each torrent.
@@ -152,8 +154,8 @@ type entry struct {
 	swarm    *swarm.Swarm
 	cancel   context.CancelFunc
 	done     chan struct{}
-	log      *slog.Logger // fixed at Add; carries the infohash
-	magnet   bool         // added from a magnet link
+	log      *slog.Logger  // fixed at Add; carries the infohash
+	complete chan struct{} // closed when every piece is verified
 
 	mu      sync.Mutex
 	state   State
@@ -377,6 +379,7 @@ func (m *Manager) add(src Source, addedAt time.Time, persist bool) (id.Hash, err
 		swarm:    m.newSwarm(),
 		cancel:   cancel,
 		done:     make(chan struct{}),
+		complete: make(chan struct{}),
 		log:      m.log.With("infohash", infoHash.Hex()),
 		state:    StateMetadata,
 		meta:     meta,
@@ -394,7 +397,6 @@ func (m *Manager) add(src Source, addedAt time.Time, persist bool) (id.Hash, err
 			trackers = append(trackers, meta.Announce())
 		}
 	}
-	e.magnet = mag != nil
 
 	e.log.Info("torrent added", "dir", src.Dir, "magnet", mag != nil, "trackers", len(trackers), "direct_peers", len(src.Peers))
 	m.wg.Add(1)
@@ -421,18 +423,16 @@ func (m *Manager) runTorrent(ctx context.Context, e *entry, trackers []string) {
 		go peersource.DHT(ctx, log.With("component", "dht"), node, e.swarm, e.infoHash, m.cfg.Port, m.cfg.DHTSource)
 	}
 
-	announce := func(left int) {
-		for _, tr := range trackers {
-			req := tracker.Request{
-				InfoHash: e.infoHash,
-				PeerID:   m.cfg.PeerID,
-				Port:     m.cfg.Port,
-				Left:     left,
-				Event:    tracker.EventStarted,
-				NumWant:  m.cfg.NumWant,
-			}
-			go peersource.Tracker(ctx, log.With("component", "tracker"), e.swarm, tr, m.cfg.TrackerOptions, req)
-		}
+	// Trackers are announced to for the torrent's whole life, with its
+	// progress as it changes.
+	base := tracker.Request{
+		InfoHash: e.infoHash,
+		PeerID:   m.cfg.PeerID,
+		Port:     m.cfg.Port,
+		NumWant:  m.cfg.NumWant,
+	}
+	for _, tr := range trackers {
+		go peersource.TrackerLoop(ctx, log.With("component", "tracker"), e.swarm, tr, m.cfg.TrackerOptions, base, e.progress, e.complete, m.cfg.TrackerLoop)
 	}
 
 	e.mu.Lock()
@@ -442,7 +442,6 @@ func (m *Manager) runTorrent(ctx context.Context, e *entry, trackers []string) {
 	if meta == nil {
 		// The size is unknown until we have the metadata; any non-zero
 		// left marks us as a leecher.
-		announce(1)
 		metaCfg := m.cfg.Metadata
 		metaCfg.Logger = log.With("component", "metadata")
 		var err error
@@ -486,18 +485,13 @@ func (m *Manager) runTorrent(ctx context.Context, e *entry, trackers []string) {
 	e.session = sess
 	e.state = StateDownloading
 	e.mu.Unlock()
-	// A magnet's trackers are announced to before the metadata fetch;
-	// otherwise announce now that we know what's left.
-	if !e.magnet || e.src.restoredInfo != "" {
-		announce(int(sess.Stats().Left))
-	}
-
 	go func() {
 		select {
 		case <-sess.Complete():
 			e.mu.Lock()
 			e.state = StateSeeding
 			e.mu.Unlock()
+			close(e.complete)
 			log.Info("torrent complete, seeding")
 		case <-ctx.Done():
 		}
@@ -505,6 +499,20 @@ func (m *Manager) runTorrent(ctx context.Context, e *entry, trackers []string) {
 
 	err = sess.Run(ctx)
 	e.finish(ctx, log, err)
+}
+
+// progress reports the torrent to its trackers. Before the metadata is
+// known the size is too, so it reports one byte left, marking us as a
+// leecher.
+func (e *entry) progress() peersource.Progress {
+	e.mu.Lock()
+	sess := e.session
+	e.mu.Unlock()
+	if sess == nil {
+		return peersource.Progress{Left: 1}
+	}
+	st := sess.Stats()
+	return peersource.Progress{Uploaded: int(st.Uploaded), Downloaded: int(st.Downloaded), Left: int(st.Left)}
 }
 
 // finish records why a torrent stopped.
