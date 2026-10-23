@@ -303,3 +303,88 @@ func TestSessionConfig(t *testing.T) {
 		require.Equal(t, data, readContent(t, dir, m))
 	})
 }
+
+// TestSharedListener routes one listener's connections to two sessions
+// by infohash, the way a daemon serves many torrents.
+func TestSharedListener(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m1, data1 := makeTorrent(t, 32*1024, 150_000)
+	m2, data2 := makeTorrent(t, 16*1024, 70_000, 9_000)
+
+	// Two seeding sessions with no listener of their own.
+	sessions := map[id.Hash]*Session{}
+	for _, tc := range []struct {
+		m    *metainfo.Metainfo
+		data []byte
+	}{{m1, data1}, {m2, data2}} {
+		dir := t.TempDir()
+		writeContent(t, dir, tc.m, tc.data)
+		s, err := New(tc.m, swarm.New(swarm.Config{MaxPeers: 10}), Config{Dir: dir, PeerID: id.NewPeerID()})
+		require.NoError(t, err)
+		done := make(chan struct{})
+		go func() { s.Run(ctx); close(done) }()
+		t.Cleanup(func() { <-done })
+		sessions[s.InfoHash()] = s
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			nc, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				c, err := peerwire.AcceptRouted(nc, func(h peerwire.Handshake) (peerwire.Handshake, bool) {
+					s, ok := sessions[h.InfoHash]
+					if !ok {
+						return peerwire.Handshake{}, false
+					}
+					return s.Handshake(), true
+				}, peerwire.Options{})
+				if err == nil {
+					sessions[c.Peer.InfoHash].AddConn(c)
+				}
+			}()
+		}
+	}()
+	shared := ln.Addr().(*net.TCPAddr).AddrPort()
+
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	l1, _ := startSession(t, ctx, m1, dir1, shared)
+	l2, _ := startSession(t, ctx, m2, dir2, shared)
+	waitComplete(t, l1)
+	waitComplete(t, l2)
+	require.Equal(t, data1, readContent(t, dir1, m1))
+	require.Equal(t, data2, readContent(t, dir2, m2))
+}
+
+func TestAddConnAfterStop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	m, _ := makeTorrent(t, 32*1024, 50_000)
+	s, err := New(m, swarm.New(swarm.Config{}), Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	done := make(chan struct{})
+	go func() { s.Run(ctx); close(done) }()
+	cancel()
+	<-done
+
+	// A real connection, so AddConn has something to close.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() {
+		nc, err := ln.Accept()
+		if err == nil {
+			peerwire.Accept(nc, s.Handshake(), peerwire.Options{})
+		}
+	}()
+	c, err := peerwire.Dial(context.Background(), ln.Addr().(*net.TCPAddr).AddrPort(), peerwire.NewHandshake(m.InfoHash(), id.NewPeerID(), false), peerwire.Options{})
+	require.NoError(t, err)
+	require.ErrorIs(t, s.AddConn(c), ErrSessionStopped)
+	<-c.Done()
+}

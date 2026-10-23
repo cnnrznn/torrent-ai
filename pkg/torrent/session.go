@@ -135,7 +135,8 @@ type Session struct {
 	dials, dialFailures, accepted atomic.Int64
 	hashFailures, timeouts        int64
 
-	span trace.Span // the running session's span
+	span    trace.Span    // the running session's span
+	stopped chan struct{} // closed when Run returns
 
 	complete     chan struct{}
 	completeOnce sync.Once
@@ -218,6 +219,7 @@ func New(m *metainfo.Metainfo, sw *swarm.Swarm, cfg Config) (*Session, error) {
 		peers:    map[*peer]struct{}{},
 		events:   make(chan event),
 		complete: make(chan struct{}),
+		stopped:  make(chan struct{}),
 		span:     trace.SpanFromContext(context.Background()),
 		sources:  map[int]map[netip.AddrPort]bool{},
 	}
@@ -274,6 +276,7 @@ func (s *Session) Stats() Stats {
 
 // Run downloads and seeds until ctx is cancelled.
 func (s *Session) Run(ctx context.Context) error {
+	defer close(s.stopped)
 	s.started = time.Now()
 	defer s.picker.releaseAll()
 	ctx, s.span = tracer().Start(ctx, "torrent.session", trace.WithAttributes(
@@ -337,7 +340,9 @@ func (s *Session) send(ctx context.Context, ev event) bool {
 	}
 }
 
-func (s *Session) handshake() peerwire.Handshake {
+// Handshake returns the handshake the session answers incoming peers
+// with.
+func (s *Session) Handshake() peerwire.Handshake {
 	return peerwire.NewHandshake(s.m.InfoHash(), s.cfg.PeerID, s.cfg.DHTPort != 0)
 }
 
@@ -354,7 +359,7 @@ func (s *Session) connectPeers(ctx context.Context) {
 		}
 		s.dials.Add(1)
 		go func() {
-			c, err := peerwire.Dial(ctx, addr, s.handshake(), s.cfg.Conn)
+			c, err := peerwire.Dial(ctx, addr, s.Handshake(), s.cfg.Conn)
 			if err != nil {
 				s.dialFailures.Add(1)
 				s.log.Debug("peer dial failed", "addr", addr, "err", err)
@@ -385,19 +390,54 @@ func (s *Session) acceptLoop(ctx context.Context, ln net.Listener) {
 			continue
 		}
 		go func() {
-			c, err := peerwire.Accept(nc, s.handshake(), s.cfg.Conn)
+			c, err := peerwire.Accept(nc, s.Handshake(), s.cfg.Conn)
 			if err != nil {
 				s.log.Debug("peer accept failed", "addr", addr, "err", err)
 				s.swarm.Release(addr, true)
 				return
 			}
-			s.accepted.Add(1)
-			if !s.send(ctx, peerConnected{c, addr, true}) {
-				c.Close()
-				s.swarm.Release(addr, false)
-			}
+			s.deliver(c, addr)
 		}()
 	}
+}
+
+// Errors from AddConn.
+var (
+	ErrSessionFull    = errors.New("session has no free peer slots")
+	ErrSessionStopped = errors.New("session has stopped")
+)
+
+// AddConn hands the session an incoming connection that has already
+// completed its handshake, such as one routed by a listener shared
+// between sessions (see peerwire.AcceptRouted). It waits for Run to
+// take the connection, and closes it if the session is full or has
+// stopped.
+func (s *Session) AddConn(c *peerwire.Conn) error {
+	addr := c.RemoteAddr()
+	if !s.swarm.Acquire(addr) {
+		c.Close()
+		return ErrSessionFull
+	}
+	return s.deliver(c, addr)
+}
+
+// deliver passes an accepted connection, whose swarm slot is held, to
+// Run.
+func (s *Session) deliver(c *peerwire.Conn, addr netip.AddrPort) error {
+	select {
+	case s.events <- peerConnected{c, addr, true}:
+		s.accepted.Add(1)
+		return nil
+	case <-s.stopped:
+		c.Close()
+		s.swarm.Release(addr, false)
+		return ErrSessionStopped
+	}
+}
+
+// InfoHash returns the torrent's infohash.
+func (s *Session) InfoHash() id.Hash {
+	return s.m.InfoHash()
 }
 
 func (s *Session) handle(ctx context.Context, ev event) {
