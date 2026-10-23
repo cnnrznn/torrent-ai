@@ -13,12 +13,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/dht"
-	"github.com/cnnrznn/torrent-scratch/pkg/id"
-	"github.com/cnnrznn/torrent-scratch/pkg/metainfo"
-	"github.com/cnnrznn/torrent-scratch/pkg/swarm"
-	"github.com/cnnrznn/torrent-scratch/pkg/torrent"
-	"github.com/cnnrznn/torrent-scratch/pkg/tracker"
+	"github.com/cnnrznn/torrent-ai/pkg/dht"
+	"github.com/cnnrznn/torrent-ai/pkg/id"
+	"github.com/cnnrznn/torrent-ai/pkg/metainfo"
+	"github.com/cnnrznn/torrent-ai/pkg/swarm"
+	"github.com/cnnrznn/torrent-ai/pkg/torrent"
+	"github.com/cnnrznn/torrent-ai/pkg/tracker"
 )
 
 // dhtInterval is how often the DHT lookup for the torrent repeats.

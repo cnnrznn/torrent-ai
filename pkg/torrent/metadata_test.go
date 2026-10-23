@@ -11,9 +11,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/id"
-	"github.com/cnnrznn/torrent-scratch/pkg/peerwire"
-	"github.com/cnnrznn/torrent-scratch/pkg/swarm"
+	"github.com/cnnrznn/torrent-ai/pkg/id"
+	"github.com/cnnrznn/torrent-ai/pkg/peerwire"
+	"github.com/cnnrznn/torrent-ai/pkg/swarm"
 )
 
 func TestFetchMetadata(t *testing.T) {

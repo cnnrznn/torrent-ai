@@ -11,8 +11,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/bencoding"
-	"github.com/cnnrznn/torrent-scratch/pkg/id"
+	"github.com/cnnrznn/torrent-ai/pkg/bencoding"
+	"github.com/cnnrznn/torrent-ai/pkg/id"
 )
 
 func TestAnnounce(t *testing.T) {

@@ -3,7 +3,7 @@ package peerwire
 import (
 	"fmt"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/bencoding"
+	"github.com/cnnrznn/torrent-ai/pkg/bencoding"
 )
 
 // ExtHandshakeID is the extended message ID of the BEP 10 handshake.

@@ -1,4 +1,4 @@
-module github.com/cnnrznn/torrent-scratch
+module github.com/cnnrznn/torrent-ai
 
 go 1.26.5
 

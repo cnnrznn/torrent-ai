@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/metainfo"
+	"github.com/cnnrznn/torrent-ai/pkg/metainfo"
 )
 
 type storageFile struct {

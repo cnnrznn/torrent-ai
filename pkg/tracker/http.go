@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/bencoding"
+	"github.com/cnnrznn/torrent-ai/pkg/bencoding"
 )
 
 type httpTracker struct {

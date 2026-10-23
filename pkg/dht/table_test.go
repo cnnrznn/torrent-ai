@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/id"
+	"github.com/cnnrznn/torrent-ai/pkg/id"
 )
 
 // withPrefix returns an ID that shares exactly n leading bits with h.

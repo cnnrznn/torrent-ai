@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/id"
+	"github.com/cnnrznn/torrent-ai/pkg/id"
 )
 
 // Magnet is a parsed magnet link (BEP 9).

@@ -9,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/id"
+	"github.com/cnnrznn/torrent-ai/pkg/id"
 )
 
 func TestExtHandshake(t *testing.T) {

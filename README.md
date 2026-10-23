@@ -1,4 +1,4 @@
-# torrent-scratch
+# torrent-ai
 
 A BitTorrent client written from scratch in Go, with no dependencies
 outside the standard library (testify is used in tests). It downloads

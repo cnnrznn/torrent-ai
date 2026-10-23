@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/id"
+	"github.com/cnnrznn/torrent-ai/pkg/id"
 )
 
 // Tracker announces to a single tracker.

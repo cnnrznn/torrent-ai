@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/bencoding"
-	"github.com/cnnrznn/torrent-scratch/pkg/id"
+	"github.com/cnnrznn/torrent-ai/pkg/bencoding"
+	"github.com/cnnrznn/torrent-ai/pkg/id"
 )
 
 // BEP 9 metadata exchange.

@@ -7,8 +7,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/bencoding"
-	"github.com/cnnrznn/torrent-scratch/pkg/metainfo"
+	"github.com/cnnrznn/torrent-ai/pkg/bencoding"
+	"github.com/cnnrznn/torrent-ai/pkg/metainfo"
 )
 
 // makeTorrent builds a multi-file torrent over random content and

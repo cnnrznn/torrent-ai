@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/id"
+	"github.com/cnnrznn/torrent-ai/pkg/id"
 )
 
 const protocol = "BitTorrent protocol"

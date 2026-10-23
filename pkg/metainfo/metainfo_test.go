@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/bencoding"
+	"github.com/cnnrznn/torrent-ai/pkg/bencoding"
 )
 
 func singleFileInfo(length, pieceLength int) string {

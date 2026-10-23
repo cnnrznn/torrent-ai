@@ -3,8 +3,8 @@ package torrent
 import (
 	"math/rand/v2"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/metainfo"
-	"github.com/cnnrznn/torrent-scratch/pkg/peerwire"
+	"github.com/cnnrznn/torrent-ai/pkg/metainfo"
+	"github.com/cnnrznn/torrent-ai/pkg/peerwire"
 )
 
 // block is a request-sized chunk of a piece.

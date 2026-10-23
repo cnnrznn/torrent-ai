@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cnnrznn/torrent-scratch/pkg/id"
+	"github.com/cnnrznn/torrent-ai/pkg/id"
 )
 
 const (
