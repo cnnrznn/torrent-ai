@@ -10,13 +10,9 @@ import (
 	"github.com/cnnrznn/torrent-ai/pkg/id"
 )
 
-const (
-	// K is the bucket size and the number of nodes a lookup converges on.
-	K = 8
-	// maxFailures is how many unanswered queries make a node bad. Bad
-	// nodes are left out of lookups and replaced first.
-	maxFailures = 2
-)
+// K is the spec-defined bucket size (BEP 5: "currently eight"), the
+// default for Config.K.
+const K = 8
 
 type entry struct {
 	node
@@ -32,10 +28,16 @@ type table struct {
 	mu      sync.Mutex
 	self    id.Hash
 	buckets [][]*entry
+
+	// k is the bucket size.
+	k int
+	// maxFailures is how many unanswered queries make a node bad. Bad
+	// nodes are left out of lookups and replaced first.
+	maxFailures int
 }
 
-func newTable(self id.Hash) *table {
-	return &table{self: self, buckets: make([][]*entry, 1)}
+func newTable(self id.Hash, k, maxFailures int) *table {
+	return &table{self: self, buckets: make([][]*entry, 1), k: k, maxFailures: maxFailures}
 }
 
 // distance is the XOR metric.
@@ -84,7 +86,7 @@ func (t *table) insert(n node) bool {
 			}
 		}
 
-		if len(b) < K {
+		if len(b) < t.k {
 			t.buckets[i] = append(b, &entry{node: n, lastSeen: now})
 			return true
 		}
@@ -95,7 +97,7 @@ func (t *table) insert(n node) bool {
 		}
 
 		for j, e := range b {
-			if e.failures >= maxFailures {
+			if e.failures >= t.maxFailures {
 				b[j] = &entry{node: n, lastSeen: now}
 				return true
 			}
@@ -140,7 +142,7 @@ func (t *table) closest(target id.Hash, k int) []node {
 	var nodes []node
 	for _, b := range t.buckets {
 		for _, e := range b {
-			if e.failures < maxFailures {
+			if e.failures < t.maxFailures {
 				nodes = append(nodes, e.node)
 			}
 		}

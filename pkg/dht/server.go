@@ -17,30 +17,62 @@ import (
 	"github.com/cnnrznn/torrent-ai/pkg/id"
 )
 
-const (
-	defaultQueryTimeout = 3 * time.Second
-	tokenRotation       = 5 * time.Minute
-	peerTTL             = 30 * time.Minute
-	maxValues           = 50
-	maxPeersPerHash     = 1000
-)
-
-// Config configures a Server.
+// Config configures a Server. Zero fields take the defaults in
+// DefaultConfig.
 type Config struct {
 	// Addr is the UDP address to listen on, e.g. ":6881".
 	Addr string
 	// ID is our node ID. A random one is used if zero.
 	ID id.Hash
-	// QueryTimeout bounds each outgoing query. Defaults to 3s.
-	QueryTimeout time.Duration
 	// Logger receives debug logs. Defaults to discarding.
 	Logger *slog.Logger
+
+	// QueryTimeout bounds each outgoing query.
+	QueryTimeout time.Duration
+	// K is the bucket size, and how many nodes a lookup converges on
+	// and get_peers/find_node replies carry (BEP 5: 8).
+	K int
+	// MaxFailures is how many queries in a row a node may leave
+	// unanswered before it is considered bad (BEP 5: "multiple").
+	MaxFailures int
+	// Alpha is how many queries a lookup keeps in flight.
+	Alpha int
+	// BootstrapAlpha is the lookup parallelism while bootstrapping.
+	BootstrapAlpha int
+	// TokenRotation is how often the token secret changes. Tokens from
+	// the previous secret are still accepted, so a token is valid for
+	// up to twice this long (BEP 5: tokens up to 10 minutes old).
+	TokenRotation time.Duration
+	// PeerTTL is how long a peer announced to us is kept.
+	PeerTTL time.Duration
+	// MaxValues caps how many peers a get_peers reply carries.
+	MaxValues int
+	// MaxStoredPeers caps how many announced peers we keep per
+	// infohash.
+	MaxStoredPeers int
+}
+
+// DefaultConfig returns the default settings, which follow BEP 5 where
+// it specifies a value.
+func DefaultConfig() Config {
+	return Config{
+		QueryTimeout:   3 * time.Second,
+		K:              K,
+		MaxFailures:    2,
+		Alpha:          3,
+		BootstrapAlpha: 16,
+		TokenRotation:  5 * time.Minute,
+		PeerTTL:        30 * time.Minute,
+		MaxValues:      50,
+		MaxStoredPeers: 1000,
+	}
 }
 
 // Server is a DHT node. It answers queries from other nodes and sends
 // its own.
 type Server struct {
 	id      id.Hash
+	cfg     Config
 	conn    *net.UDPConn
 	table   *table
 	timeout time.Duration
@@ -121,9 +153,16 @@ func New(cfg Config) (*Server, error) {
 	if cfg.ID == (id.Hash{}) {
 		cfg.ID = id.Random()
 	}
-	if cfg.QueryTimeout <= 0 {
-		cfg.QueryTimeout = defaultQueryTimeout
-	}
+	d := DefaultConfig()
+	setDefault(&cfg.QueryTimeout, d.QueryTimeout)
+	setDefault(&cfg.K, d.K)
+	setDefault(&cfg.MaxFailures, d.MaxFailures)
+	setDefault(&cfg.Alpha, d.Alpha)
+	setDefault(&cfg.BootstrapAlpha, d.BootstrapAlpha)
+	setDefault(&cfg.TokenRotation, d.TokenRotation)
+	setDefault(&cfg.PeerTTL, d.PeerTTL)
+	setDefault(&cfg.MaxValues, d.MaxValues)
+	setDefault(&cfg.MaxStoredPeers, d.MaxStoredPeers)
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -139,8 +178,9 @@ func New(cfg Config) (*Server, error) {
 
 	s := &Server{
 		id:      cfg.ID,
+		cfg:     cfg,
 		conn:    conn,
-		table:   newTable(cfg.ID),
+		table:   newTable(cfg.ID, cfg.K, cfg.MaxFailures),
 		timeout: cfg.QueryTimeout,
 		log:     cfg.Logger,
 		pending: map[string]*pendingQuery{},
@@ -201,28 +241,38 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
+// setDefault replaces a zero or negative setting with its default.
+func setDefault[T int | time.Duration](v *T, d T) {
+	if *v <= 0 {
+		*v = d
+	}
+}
+
 // maintain rotates token secrets and expires stored peers.
 func (s *Server) maintain(ctx context.Context) {
-	ticker := time.NewTicker(tokenRotation)
-	defer ticker.Stop()
+	rotate := time.NewTicker(s.cfg.TokenRotation)
+	defer rotate.Stop()
+	expire := time.NewTicker(s.cfg.PeerTTL)
+	defer expire.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-rotate.C:
+			s.tokenMu.Lock()
+			s.prevSecret = s.secret
+			rand.Read(s.secret[:])
+			s.tokenMu.Unlock()
+			continue
+		case <-expire.C:
 		}
-
-		s.tokenMu.Lock()
-		s.prevSecret = s.secret
-		rand.Read(s.secret[:])
-		s.tokenMu.Unlock()
 
 		now := time.Now()
 		s.peersMu.Lock()
 		for h, set := range s.peers {
 			for a, seen := range set {
-				if now.Sub(seen) > peerTTL {
+				if now.Sub(seen) > s.cfg.PeerTTL {
 					delete(set, a)
 				}
 			}
@@ -392,7 +442,7 @@ func (s *Server) handleQuery(m msg, from netip.AddrPort) {
 			s.send(encodeError(m.T, errProtocol, "missing target"), from)
 			return
 		}
-		r["nodes"] = bencoding.EncodeString(encodeNodes(s.table.closest(target, K)))
+		r["nodes"] = bencoding.EncodeString(encodeNodes(s.table.closest(target, s.cfg.K)))
 
 	case "get_peers":
 		infoHash, ok := getID(m.A, "info_hash")
@@ -401,7 +451,7 @@ func (s *Server) handleQuery(m msg, from netip.AddrPort) {
 			return
 		}
 		r["token"] = bencoding.EncodeString(s.token(from.Addr(), s.currentSecret()))
-		r["nodes"] = bencoding.EncodeString(encodeNodes(s.table.closest(infoHash, K)))
+		r["nodes"] = bencoding.EncodeString(encodeNodes(s.table.closest(infoHash, s.cfg.K)))
 		if peers := s.storedPeers(infoHash); len(peers) > 0 {
 			var values []string
 			for _, p := range peers {
@@ -472,7 +522,7 @@ func (s *Server) storePeer(infoHash id.Hash, addr netip.AddrPort) {
 		set = map[netip.AddrPort]time.Time{}
 		s.peers[infoHash] = set
 	}
-	if _, ok := set[addr]; !ok && len(set) >= maxPeersPerHash {
+	if _, ok := set[addr]; !ok && len(set) >= s.cfg.MaxStoredPeers {
 		return
 	}
 	set[addr] = time.Now()
@@ -482,10 +532,14 @@ func (s *Server) storedPeers(infoHash id.Hash) []netip.AddrPort {
 	s.peersMu.Lock()
 	defer s.peersMu.Unlock()
 
+	now := time.Now()
 	var peers []netip.AddrPort
-	for a := range s.peers[infoHash] {
-		if len(peers) == maxValues {
+	for a, seen := range s.peers[infoHash] {
+		if len(peers) == s.cfg.MaxValues {
 			break
+		}
+		if now.Sub(seen) > s.cfg.PeerTTL {
+			continue
 		}
 		peers = append(peers, a)
 	}

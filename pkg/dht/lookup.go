@@ -13,15 +13,6 @@ import (
 	"github.com/cnnrznn/torrent-ai/pkg/id"
 )
 
-// alpha is the number of queries a lookup keeps in flight.
-const alpha = 3
-
-// bootstrapAlpha is the parallelism for the bootstrap lookup. Many
-// nodes a fresh client learns about are unreachable, and each one
-// holds a slot until its query times out, so a wider lookup joins the
-// DHT much faster.
-const bootstrapAlpha = 16
-
 // DefaultRouters are well-known nodes to bootstrap from.
 var DefaultRouters = []string{
 	"router.bittorrent.com:6881",
@@ -75,7 +66,7 @@ type lookupResult struct {
 }
 
 // lookup walks toward target, querying the closest known nodes
-// parallel at a time, until the K closest nodes that answered have all been
+// parallel at a time, until the k closest nodes that answered have all been
 // queried. With getPeers it sends get_peers and streams any peers found
 // to found; otherwise it sends find_node. It returns the closest nodes
 // that answered, nearest first.
@@ -93,7 +84,7 @@ func (s *Server) lookup(ctx context.Context, target id.Hash, getPeers bool, foun
 			cands[n.ID] = &candidate{node: n}
 		}
 	}
-	for _, n := range s.table.closest(target, K) {
+	for _, n := range s.table.closest(target, s.cfg.K) {
 		add(n)
 	}
 	for _, n := range seeds {
@@ -112,7 +103,7 @@ func (s *Server) lookup(ctx context.Context, target id.Hash, getPeers bool, foun
 			}
 		}
 		sortByDistance(nodes, target)
-		for _, n := range nodes[:min(K, len(nodes))] {
+		for _, n := range nodes[:min(s.cfg.K, len(nodes))] {
 			list = append(list, cands[n.ID])
 		}
 		return list
@@ -225,7 +216,10 @@ func (s *Server) Bootstrap(ctx context.Context, routers []string) (LookupStats, 
 	}
 	wg.Wait()
 
-	_, st, err := s.lookup(ctx, s.id, false, nil, seeds, bootstrapAlpha)
+	// Many nodes a fresh client learns about are unreachable, and each
+	// one holds a slot until its query times out, so a wider lookup
+	// joins the DHT much faster.
+	_, st, err := s.lookup(ctx, s.id, false, nil, seeds, s.cfg.BootstrapAlpha)
 	if err != nil {
 		return st, err
 	}
@@ -238,7 +232,7 @@ func (s *Server) Bootstrap(ctx context.Context, routers []string) (LookupStats, 
 // GetPeers looks up peers for infoHash, calling found with each batch
 // as it arrives.
 func (s *Server) GetPeers(ctx context.Context, infoHash id.Hash, found func([]netip.AddrPort)) (LookupStats, error) {
-	_, st, err := s.lookup(ctx, infoHash, true, found, nil, alpha)
+	_, st, err := s.lookup(ctx, infoHash, true, found, nil, s.cfg.Alpha)
 	return st, err
 }
 
@@ -247,7 +241,7 @@ func (s *Server) GetPeers(ctx context.Context, infoHash id.Hash, found func([]ne
 // gave us a token.
 func (s *Server) Announce(ctx context.Context, infoHash id.Hash, port int, found func([]netip.AddrPort)) (LookupStats, error) {
 	start := time.Now()
-	closest, st, err := s.lookup(ctx, infoHash, true, found, nil, alpha)
+	closest, st, err := s.lookup(ctx, infoHash, true, found, nil, s.cfg.Alpha)
 	if err != nil {
 		return st, err
 	}

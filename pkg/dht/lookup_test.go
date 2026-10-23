@@ -41,7 +41,7 @@ func TestLookup(t *testing.T) {
 
 	t.Run("find_node lookup converges on the closest nodes", func(t *testing.T) {
 		target := id.Random()
-		got, st, err := nodes[7].lookup(ctx, target, false, nil, nil, alpha)
+		got, st, err := nodes[7].lookup(ctx, target, false, nil, nil, DefaultConfig().Alpha)
 		require.NoError(t, err)
 
 		var all []node

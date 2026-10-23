@@ -94,12 +94,12 @@ func TestServer(t *testing.T) {
 
 		// Close the socket so it can't answer.
 		gone.conn.Close()
-		for range maxFailures {
+		for range defaultMaxFailures {
 			_, err := a.getPeers(ctx, n, id.Random())
 			require.ErrorContains(t, err, "timed out")
 		}
 		require.NotContains(t, ids(a.table.closest(n.ID, 100)), n.ID)
-		require.GreaterOrEqual(t, a.Stats().Timeouts, int64(maxFailures))
+		require.GreaterOrEqual(t, a.Stats().Timeouts, int64(defaultMaxFailures))
 	})
 }
 
@@ -118,4 +118,25 @@ func TestTokens(t *testing.T) {
 	require.True(t, s.validToken(ip, tok))
 	s.prevSecret, s.secret = s.secret, [16]byte{2}
 	require.False(t, s.validToken(ip, tok))
+}
+
+func TestStoredPeerTTL(t *testing.T) {
+	s, err := New(Config{Addr: "127.0.0.1:0", PeerTTL: 50 * time.Millisecond})
+	require.NoError(t, err)
+	defer s.conn.Close()
+
+	infoHash := id.Random()
+	s.storePeer(infoHash, netip.MustParseAddrPort("1.2.3.4:5"))
+	require.Len(t, s.storedPeers(infoHash), 1)
+	time.Sleep(100 * time.Millisecond)
+	require.Empty(t, s.storedPeers(infoHash), "expired peers are not returned")
+}
+
+func TestDefaultConfig(t *testing.T) {
+	s, err := New(Config{Addr: "127.0.0.1:0"})
+	require.NoError(t, err)
+	defer s.conn.Close()
+	want := DefaultConfig()
+	want.Addr, want.ID, want.Logger = s.cfg.Addr, s.cfg.ID, s.cfg.Logger
+	require.Equal(t, want, s.cfg)
 }
