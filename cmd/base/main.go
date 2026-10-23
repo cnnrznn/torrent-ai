@@ -46,7 +46,7 @@ var errTimeout = errors.New("timeout")
 func main() {
 	var cfg config
 	flag.StringVar(&cfg.dir, "o", ".", "directory to download into")
-	flag.IntVar(&cfg.port, "port", 6881, "TCP port for peers, and UDP port for the DHT")
+	flag.IntVar(&cfg.port, "port", 6881, "TCP port for peers, and UDP port for the DHT (0 = pick a free one)")
 	flag.BoolVar(&cfg.seed, "seed", false, "keep seeding after the download completes")
 	flag.BoolVar(&cfg.dht, "dht", true, "find peers through the DHT")
 	flag.DurationVar(&cfg.timeout, "timeout", 0, "give up after this long, exiting with code 3 (0 = no limit)")
@@ -140,15 +140,25 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 		infoHash = m.InfoHash()
 	}
 
+	// Listen first so -port 0 resolves to a real port, which the DHT
+	// then shares. Run closes the listener; this covers early returns.
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.port))
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
 	var node *dht.Server
 	if cfg.dht {
-		node, err = dht.New(dht.Config{Addr: fmt.Sprintf(":%d", cfg.port), Logger: log.With("component", compDHT)})
+		node, err = dht.New(dht.Config{Addr: fmt.Sprintf(":%d", port), Logger: log.With("component", compDHT)})
 		if err != nil {
-			return err
+			return fmt.Errorf("dht: %w", err)
 		}
 		go node.Run(ctx)
-		go dhtPeers(ctx, log.With("component", compDHT), node, sw, infoHash, cfg.port)
+		go dhtPeers(ctx, log.With("component", compDHT), node, sw, infoHash, port)
 	}
+	mainLog.Info("listening", "port", port, "dht", node != nil)
 
 	if mag != nil {
 		mainLog.Info("fetching metadata", "name", mag.Name, "infohash", infoHash.Hex(), "trackers", len(mag.Trackers))
@@ -156,7 +166,7 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 			go announce(ctx, trackerLog, sw, tr, tracker.Request{
 				InfoHash: infoHash,
 				PeerID:   peerID,
-				Port:     cfg.port,
+				Port:     port,
 				// The size is unknown until we have the metadata; any
 				// non-zero value marks us as a leecher.
 				Left:  1,
@@ -169,11 +179,6 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 	}
 	mainLog.Info("loaded torrent", "name", m.Name(), "size", m.Length(), "pieces", m.NumPieces(), "infohash", infoHash.Hex())
 
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.port))
-	if err != nil {
-		return err
-	}
-
 	sessCfg := torrent.Config{
 		Dir:      cfg.dir,
 		PeerID:   peerID,
@@ -181,12 +186,11 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 		Logger:   log.With("component", compSession),
 	}
 	if node != nil {
-		sessCfg.DHTPort = cfg.port
+		sessCfg.DHTPort = port
 		sessCfg.OnPort = node.AddNode
 	}
 	s, err := torrent.New(m, sw, sessCfg)
 	if err != nil {
-		ln.Close()
 		return err
 	}
 
@@ -194,7 +198,7 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 		go announce(ctx, trackerLog, sw, m.Announce(), tracker.Request{
 			InfoHash: infoHash,
 			PeerID:   peerID,
-			Port:     cfg.port,
+			Port:     port,
 			Left:     int(s.Stats().Left),
 			Event:    tracker.EventStarted,
 		})
