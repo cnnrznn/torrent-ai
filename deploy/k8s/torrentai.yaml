@@ -1,0 +1,148 @@
+# torrentai daemon on Kubernetes: one replica with a volume for state
+# and downloads, the API inside the cluster, and the peer port exposed
+# for incoming connections. See deploy/k8s/README.md.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: torrentai
+  labels:
+    app.kubernetes.io/name: torrentai
+spec:
+  replicas: 1
+  serviceName: torrentai-api
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: torrentai
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: torrentai
+    spec:
+      # Long enough for the shutdown sequence: stopped announces, saving
+      # state and the DHT table, a final profile upload, flushing OTel.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: torrentai
+          image: torrentai:dev
+          args: ["serve"]
+          env:
+            - name: TORRENT_AI_STATE_DIR
+              value: /data/state
+            - name: TORRENT_AI_O
+              value: /data/downloads
+            - name: TORRENT_AI_PORT
+              value: "6881"
+            - name: TORRENT_AI_API_ADDR
+              value: ":8737"
+            - name: TORRENT_AI_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: torrentai
+                  key: api-token
+            - name: TORRENT_AI_LOG_FORMAT
+              value: json
+            - name: TORRENT_AI_MAX_MEMORY
+              value: 512MiB
+            - name: TORRENT_AI_MAX_PEERS
+              value: "200"
+            # Continuous flame graphs: uncomment and point at Pyroscope
+            # or Grafana Cloud Profiles (credentials in the Secret).
+            # - name: TORRENT_AI_PYROSCOPE_URL
+            #   value: http://pyroscope.monitoring:4040
+            # - name: TORRENT_AI_PYROSCOPE_LABELS
+            #   value: env=homelab
+            # Traces, metrics and logs over OTLP:
+            # - name: TORRENT_AI_OTEL
+            #   value: ""
+            # - name: TORRENT_AI_OTEL_ENDPOINT
+            #   value: http://otel-collector.monitoring:4318
+          ports:
+            - name: peers-tcp
+              containerPort: 6881
+              protocol: TCP
+            - name: peers-udp
+              containerPort: 6881
+              protocol: UDP
+            - name: api
+              containerPort: 8737
+              protocol: TCP
+          readinessProbe:
+            # Ready once the listener is up and the DHT has k nodes.
+            httpGet:
+              path: /readyz
+              port: api
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: api
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+---
+# The control API, inside the cluster only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: torrentai-api
+  labels:
+    app.kubernetes.io/name: torrentai
+spec:
+  selector:
+    app.kubernetes.io/name: torrentai
+  ports:
+    - name: api
+      port: 8737
+      targetPort: api
+---
+# Incoming peers and DHT traffic. The daemon announces the port it
+# listens on, so the outside port must be the same 6881; a NodePort's
+# 30000+ remapping would break that. Downloads work without this
+# Service, since outgoing connections need nothing exposed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: torrentai-peers
+  labels:
+    app.kubernetes.io/name: torrentai
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: torrentai
+  ports:
+    - name: peers-tcp
+      port: 6881
+      targetPort: peers-tcp
+      protocol: TCP
+    - name: peers-udp
+      port: 6881
+      targetPort: peers-udp
+      protocol: UDP

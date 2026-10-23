@@ -1,0 +1,5 @@
+.git
+data
+*.torrent
+*.iso
+*.pprof
