@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"math/rand/v2"
@@ -10,6 +11,8 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -251,4 +254,25 @@ func TestTrackerEvents(t *testing.T) {
 
 	require.NoError(t, n.m.Remove(a.meta.InfoHash(), false))
 	require.Equal(t, "stopped", next())
+}
+
+func TestProfileLabels(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := New(Config{})
+	go m.Run(ctx)
+
+	a := makeTorrent(t, "a.bin", 20_000, 16*1024, 17)
+	_, err := m.Add(Source{Magnet: a.magnet(), Dir: t.TempDir()})
+	require.NoError(t, err)
+
+	// The torrent's goroutines carry its labels, even though Add ran
+	// on an unlabeled goroutine.
+	require.Eventually(t, func() bool {
+		var buf bytes.Buffer
+		pprof.Lookup("goroutine").WriteTo(&buf, 1)
+		out := buf.String()
+		return strings.Contains(out, `"torrent":"`+a.meta.InfoHash().Hex()+`"`) &&
+			strings.Contains(out, `"component":"metadata"`)
+	}, 5*time.Second, 20*time.Millisecond)
 }

@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"slices"
 	"strings"
 	"sync"
@@ -436,7 +437,13 @@ func (m *Manager) add(src Source, addedAt time.Time, persist bool) (id.Hash, err
 	go func() {
 		defer m.wg.Done()
 		defer close(e.done)
-		m.runTorrent(ctx, e, trackers)
+		// Profile labels, inherited by every goroutine the torrent
+		// starts, so flame graphs can be split per torrent and
+		// subsystem. Add may run on an API request goroutine, so the
+		// labels start fresh from the Manager's context.
+		pprof.Do(ctx, pprof.Labels("component", "session", "torrent", infoHash.Hex()), func(ctx context.Context) {
+			m.runTorrent(ctx, e, trackers)
+		})
 	}()
 	return infoHash, nil
 }
@@ -466,7 +473,10 @@ func (m *Manager) runTorrent(ctx context.Context, e *entry, trackers []string) {
 	log := e.log
 	e.swarm.Add(e.src.Peers...)
 	if node := m.cfg.DHT; node != nil {
-		go peersource.DHT(ctx, log.With("component", "dht"), node, e.swarm, e.infoHash, m.cfg.Port, m.cfg.DHTSource)
+		dhtLog := log.With("component", "dht")
+		go labeled(ctx, "dht", func(ctx context.Context) {
+			peersource.DHT(ctx, dhtLog, node, e.swarm, e.infoHash, m.cfg.Port, m.cfg.DHTSource)
+		})
 	}
 
 	// Trackers are announced to for the torrent's whole life, with its
@@ -477,8 +487,11 @@ func (m *Manager) runTorrent(ctx context.Context, e *entry, trackers []string) {
 		Port:     m.cfg.Port,
 		NumWant:  m.cfg.NumWant,
 	}
+	trackerLog := log.With("component", "tracker")
 	for _, tr := range trackers {
-		go peersource.TrackerLoop(ctx, log.With("component", "tracker"), e.swarm, tr, m.cfg.TrackerOptions, base, e.progress, e.complete, m.cfg.TrackerLoop)
+		go labeled(ctx, "tracker", func(ctx context.Context) {
+			peersource.TrackerLoop(ctx, trackerLog, e.swarm, tr, m.cfg.TrackerOptions, base, e.progress, e.complete, m.cfg.TrackerLoop)
+		})
 	}
 
 	e.mu.Lock()
@@ -491,7 +504,9 @@ func (m *Manager) runTorrent(ctx context.Context, e *entry, trackers []string) {
 		metaCfg := m.cfg.Metadata
 		metaCfg.Logger = log.With("component", "metadata")
 		var err error
-		meta, err = torrent.FetchMetadata(ctx, e.swarm, e.infoHash, m.cfg.PeerID, metaCfg)
+		labeled(ctx, "metadata", func(ctx context.Context) {
+			meta, err = torrent.FetchMetadata(ctx, e.swarm, e.infoHash, m.cfg.PeerID, metaCfg)
+		})
 		if err != nil {
 			e.finish(ctx, log, err)
 			return
@@ -609,6 +624,12 @@ func (m *Manager) record(e *entry) (Record, bool) {
 		}
 	}
 	return Record{}, false
+}
+
+// labeled runs fn with the pprof "component" label replaced, keeping
+// the torrent label from ctx.
+func labeled(ctx context.Context, component string, fn func(context.Context)) {
+	pprof.Do(ctx, pprof.Labels("component", component), fn)
 }
 
 // progress reports the torrent to its trackers. Before the metadata is
