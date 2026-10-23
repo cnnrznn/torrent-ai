@@ -58,6 +58,10 @@ type Config struct {
 	// torrents; 0 means no limit.
 	MaxMemory int64
 
+	// Store, if set, persists torrents and their info dicts so Restore
+	// can bring them back after a restart.
+	Store *Store
+
 	// Swarm, Session and Metadata are templates for each torrent.
 	// Session's Dir, PeerID, Listener, Logger, DHTPort, OnPort, Memory
 	// and MaxMemory are set per torrent.
@@ -78,6 +82,9 @@ type Source struct {
 	Peers []netip.AddrPort
 	// Trackers are announce URLs in addition to the torrent's own.
 	Trackers []string
+
+	// restoredInfo is a magnet's cached info dict, set by Restore.
+	restoredInfo string
 }
 
 // State is where a torrent is in its life.
@@ -145,6 +152,7 @@ type entry struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 	log      *slog.Logger // fixed at Add; carries the infohash
+	magnet   bool         // added from a magnet link
 
 	mu      sync.Mutex
 	state   State
@@ -240,8 +248,69 @@ func (m *Manager) session(infoHash id.Hash) *torrent.Session {
 	return e.session
 }
 
-// Add starts a torrent and returns its infohash.
+// Add starts a torrent and returns its infohash. With a Store, the
+// torrent is saved so Restore brings it back after a restart.
 func (m *Manager) Add(src Source) (id.Hash, error) {
+	return m.add(src, time.Now(), true)
+}
+
+// Restore re-adds every torrent in the Store, using cached info dicts
+// so magnet links don't fetch their metadata again. It returns how
+// many were restored.
+func (m *Manager) Restore() (int, error) {
+	if m.cfg.Store == nil {
+		return 0, nil
+	}
+	records, err := m.cfg.Store.Records()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	var errs []error
+	for _, r := range records {
+		src, err := m.sourceFromRecord(r)
+		if err == nil {
+			_, err = m.add(src, r.AddedAt, false)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", r.InfoHash, err))
+			continue
+		}
+		n++
+	}
+	m.log.Info("torrents restored", "count", n, "failed", len(errs))
+	return n, errors.Join(errs...)
+}
+
+// sourceFromRecord rebuilds a Source, swapping a magnet link for its
+// cached info dict when there is one.
+func (m *Manager) sourceFromRecord(r Record) (Source, error) {
+	src := Source{Magnet: r.Magnet, Torrent: r.Torrent, Dir: r.Dir, Trackers: r.Trackers}
+	for _, p := range r.Peers {
+		a, err := netip.ParseAddrPort(p)
+		if err != nil {
+			return src, err
+		}
+		src.Peers = append(src.Peers, a)
+	}
+	if r.Magnet == "" {
+		return src, nil
+	}
+	mag, err := metainfo.ParseMagnet(r.Magnet)
+	if err != nil {
+		return src, err
+	}
+	raw, ok, err := m.cfg.Store.LoadInfo(mag.InfoHash)
+	if err != nil || !ok {
+		return src, err
+	}
+	// Keep the magnet's trackers and name, but skip the metadata
+	// fetch.
+	src.restoredInfo = raw
+	return src, nil
+}
+
+func (m *Manager) add(src Source, addedAt time.Time, persist bool) (id.Hash, error) {
 	var meta *metainfo.Metainfo
 	var mag *metainfo.Magnet
 	var infoHash id.Hash
@@ -252,6 +321,14 @@ func (m *Manager) Add(src Source) (id.Hash, error) {
 			return id.Hash{}, err
 		}
 		infoHash = mag.InfoHash
+		if src.restoredInfo != "" {
+			if meta, err = metainfo.FromInfoDict(src.restoredInfo); err != nil {
+				return id.Hash{}, fmt.Errorf("cached info dict: %w", err)
+			}
+			if meta.InfoHash() != infoHash {
+				return id.Hash{}, errors.New("cached info dict does not match the infohash")
+			}
+		}
 	case len(src.Torrent) > 0:
 		var err error
 		if meta, err = metainfo.New(string(src.Torrent)); err != nil {
@@ -274,11 +351,28 @@ func (m *Manager) Add(src Source) (id.Hash, error) {
 		return infoHash, ErrExists
 	}
 
+	if persist && m.cfg.Store != nil {
+		r := Record{
+			InfoHash: infoHash.Hex(),
+			Magnet:   src.Magnet,
+			Torrent:  src.Torrent,
+			Dir:      src.Dir,
+			Trackers: src.Trackers,
+			AddedAt:  addedAt,
+		}
+		for _, p := range src.Peers {
+			r.Peers = append(r.Peers, p.String())
+		}
+		if err := m.cfg.Store.Save(r); err != nil {
+			return id.Hash{}, fmt.Errorf("save torrent: %w", err)
+		}
+	}
+
 	ctx, cancel := context.WithCancel(m.ctx)
 	e := &entry{
 		infoHash: infoHash,
 		src:      src,
-		addedAt:  time.Now(),
+		addedAt:  addedAt,
 		swarm:    m.newSwarm(),
 		cancel:   cancel,
 		done:     make(chan struct{}),
@@ -299,6 +393,7 @@ func (m *Manager) Add(src Source) (id.Hash, error) {
 			trackers = append(trackers, meta.Announce())
 		}
 	}
+	e.magnet = mag != nil
 
 	e.log.Info("torrent added", "dir", src.Dir, "magnet", mag != nil, "trackers", len(trackers), "direct_peers", len(src.Peers))
 	m.wg.Add(1)
@@ -358,6 +453,11 @@ func (m *Manager) runTorrent(ctx context.Context, e *entry, trackers []string) {
 		e.mu.Lock()
 		e.meta = meta
 		e.mu.Unlock()
+		if st := m.cfg.Store; st != nil {
+			if err := st.SaveInfo(e.infoHash, meta.RawInfo()); err != nil {
+				log.Warn("caching info dict failed", "err", err)
+			}
+		}
 	}
 	log = log.With("name", meta.Name())
 
@@ -382,9 +482,9 @@ func (m *Manager) runTorrent(ctx context.Context, e *entry, trackers []string) {
 	e.session = sess
 	e.state = StateDownloading
 	e.mu.Unlock()
-	// A magnet's trackers were announced to before the metadata fetch;
-	// a .torrent's are announced to now that we know what's left.
-	if e.src.Magnet == "" {
+	// A magnet's trackers are announced to before the metadata fetch;
+	// otherwise announce now that we know what's left.
+	if !e.magnet || e.src.restoredInfo != "" {
 		announce(int(sess.Stats().Left))
 	}
 
@@ -432,6 +532,11 @@ func (m *Manager) Remove(infoHash id.Hash, deleteFiles bool) error {
 	e.cancel()
 	<-e.done
 	e.log.Info("torrent removed", "delete_files", deleteFiles)
+	if st := m.cfg.Store; st != nil {
+		if err := st.Delete(infoHash); err != nil {
+			return err
+		}
+	}
 
 	if !deleteFiles {
 		return nil

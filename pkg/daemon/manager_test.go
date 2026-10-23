@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cnnrznn/torrent-ai/pkg/bencoding"
@@ -96,11 +97,12 @@ func startNode(t *testing.T, ctx context.Context, routers []string) *node {
 func waitState(t *testing.T, m *Manager, tt testTorrent, want State) Status {
 	t.Helper()
 	var st Status
-	require.Eventually(t, func() bool {
-		var err error
+	var err error
+	ok := assert.Eventually(t, func() bool {
 		st, err = m.Status(tt.meta.InfoHash())
 		return err == nil && st.State == want
-	}, 20*time.Second, 20*time.Millisecond, "waiting for %s: last status %+v", want, st)
+	}, 20*time.Second, 20*time.Millisecond)
+	require.True(t, ok, "waiting for %s: last status %+v, err %v", want, st, err)
 	return st
 }
 
