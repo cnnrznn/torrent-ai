@@ -37,6 +37,12 @@ type Config struct {
 	MaxInFlight int
 	// Logger receives debug and progress logs. Defaults to discarding.
 	Logger *slog.Logger
+	// DHTPort, if set, is the UDP port of our DHT node. It is
+	// advertised in the handshake and sent to peers that run the DHT.
+	DHTPort int
+	// OnPort is called with a peer's DHT node address when it sends a
+	// port message.
+	OnPort func(netip.AddrPort)
 }
 
 // Stats is a snapshot of a session's progress.
@@ -221,7 +227,7 @@ func (s *Session) send(ctx context.Context, ev event) bool {
 }
 
 func (s *Session) handshake() peerwire.Handshake {
-	return peerwire.NewHandshake(s.m.InfoHash(), s.cfg.PeerID, false)
+	return peerwire.NewHandshake(s.m.InfoHash(), s.cfg.PeerID, s.cfg.DHTPort != 0)
 }
 
 // connectPeers dials addresses from the swarm until it runs out of
@@ -327,6 +333,9 @@ func (s *Session) addPeer(ctx context.Context, c *peerwire.Conn, addr netip.Addr
 	if s.picker.have.Count() > 0 {
 		c.Send(peerwire.MsgBitfield(s.picker.have))
 	}
+	if s.cfg.DHTPort != 0 && c.Peer.SupportsDHT() {
+		c.Send(peerwire.MsgPort(uint16(s.cfg.DHTPort)))
+	}
 }
 
 func (s *Session) removePeer(p *peer) {
@@ -411,6 +420,15 @@ func (s *Session) handleMessage(p *peer, m peerwire.Message) error {
 			return err
 		}
 		s.receiveBlock(p, block{index, begin, len(data)}, data)
+
+	case peerwire.Port:
+		port, err := m.ParsePort()
+		if err != nil {
+			return err
+		}
+		if s.cfg.OnPort != nil && port != 0 {
+			s.cfg.OnPort(netip.AddrPortFrom(p.addr.Addr(), port))
+		}
 
 	case peerwire.Extended:
 		extID, payload, err := m.ParseExtended()

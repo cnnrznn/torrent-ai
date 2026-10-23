@@ -162,3 +162,57 @@ func TestSessionServesMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, m.RawInfo(), info)
 }
+
+func TestSessionDHTPort(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m, _ := makeTorrent(t, 32*1024, 100_000)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().(*net.TCPAddr).AddrPort()
+
+	ports := make(chan netip.AddrPort, 1)
+	s, err := New(m, swarm.New(10), Config{
+		Dir:      t.TempDir(),
+		PeerID:   id.NewPeerID(),
+		Listener: ln,
+		DHTPort:  6881,
+		OnPort:   func(a netip.AddrPort) { ports <- a },
+	})
+	require.NoError(t, err)
+	done := make(chan struct{})
+	go func() {
+		s.Run(ctx)
+		close(done)
+	}()
+	defer func() { cancel(); <-done }()
+
+	c, err := peerwire.Dial(ctx, addr, peerwire.NewHandshake(m.InfoHash(), id.NewPeerID(), true))
+	require.NoError(t, err)
+	defer c.Close()
+	require.True(t, c.Peer.SupportsDHT())
+
+	t.Run("sends its DHT port", func(t *testing.T) {
+		for msg := range c.Messages() {
+			if msg.ID == peerwire.Port {
+				port, err := msg.ParsePort()
+				require.NoError(t, err)
+				require.EqualValues(t, 6881, port)
+				return
+			}
+		}
+		t.Fatal("no port message")
+	})
+
+	t.Run("reports the peer's DHT port", func(t *testing.T) {
+		require.NoError(t, c.Send(peerwire.MsgPort(7777)))
+		select {
+		case got := <-ports:
+			require.Equal(t, netip.AddrPortFrom(addr.Addr(), 7777), got)
+		case <-time.After(5 * time.Second):
+			t.Fatal("OnPort not called")
+		}
+	})
+}
