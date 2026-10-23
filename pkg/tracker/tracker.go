@@ -133,12 +133,12 @@ func New(announce string, opts ...Option) (Tracker, error) {
 
 	switch a.Scheme {
 	case "http", "https":
-		return &httpTracker{announce: *a, client: o.httpClient, log: o.log}, nil
+		return traced(&httpTracker{announce: *a, client: o.httpClient, log: o.log}, announce, "http"), nil
 	case "udp":
 		if a.Port() == "" {
 			return nil, fmt.Errorf("udp tracker %q has no port", announce)
 		}
-		return &udpTracker{host: a.Host, timeout: o.udpTimeout, retries: o.udpRetries, connTTL: o.udpConnTTL, log: o.log}, nil
+		return traced(&udpTracker{host: a.Host, timeout: o.udpTimeout, retries: o.udpRetries, connTTL: o.udpConnTTL, log: o.log}, announce, "udp"), nil
 	}
 	return nil, fmt.Errorf("unsupported tracker scheme %q", a.Scheme)
 }

@@ -185,9 +185,7 @@ func (s *Server) lookup(ctx context.Context, target id.Hash, getPeers bool, foun
 	return result, st, nil
 }
 
-// Bootstrap joins the DHT through the given router addresses
-// ("host:port"), then looks up our own ID to fill the routing table.
-func (s *Server) Bootstrap(ctx context.Context, routers []string) (LookupStats, error) {
+func (s *Server) bootstrapLookup(ctx context.Context, routers []string) (LookupStats, error) {
 	var mu sync.Mutex
 	var seeds []node
 	var wg sync.WaitGroup
@@ -229,17 +227,12 @@ func (s *Server) Bootstrap(ctx context.Context, routers []string) (LookupStats, 
 	return st, nil
 }
 
-// GetPeers looks up peers for infoHash, calling found with each batch
-// as it arrives.
-func (s *Server) GetPeers(ctx context.Context, infoHash id.Hash, found func([]netip.AddrPort)) (LookupStats, error) {
+func (s *Server) peersLookup(ctx context.Context, infoHash id.Hash, found func([]netip.AddrPort)) (LookupStats, error) {
 	_, st, err := s.lookup(ctx, infoHash, true, found, nil, s.cfg.Alpha)
 	return st, err
 }
 
-// Announce looks up peers for infoHash like GetPeers, then announces
-// that we accept peer connections on port to the closest nodes that
-// gave us a token.
-func (s *Server) Announce(ctx context.Context, infoHash id.Hash, port int, found func([]netip.AddrPort)) (LookupStats, error) {
+func (s *Server) announceLookup(ctx context.Context, infoHash id.Hash, port int, found func([]netip.AddrPort)) (LookupStats, error) {
 	start := time.Now()
 	closest, st, err := s.lookup(ctx, infoHash, true, found, nil, s.cfg.Alpha)
 	if err != nil {

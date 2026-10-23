@@ -12,6 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/cnnrznn/torrent-ai/pkg/id"
 	"github.com/cnnrznn/torrent-ai/pkg/metainfo"
 	"github.com/cnnrznn/torrent-ai/pkg/peerwire"
@@ -130,6 +133,8 @@ type Session struct {
 	dials, dialFailures, accepted atomic.Int64
 	hashFailures, timeouts        int64
 
+	span trace.Span // the running session's span
+
 	complete     chan struct{}
 	completeOnce sync.Once
 
@@ -159,6 +164,8 @@ type peer struct {
 	// utMetadata is the peer's extended message ID for ut_metadata, or
 	// 0 if it doesn't support it.
 	utMetadata int
+
+	span trace.Span // covers the connection's lifetime
 }
 
 type event any
@@ -209,6 +216,7 @@ func New(m *metainfo.Metainfo, sw *swarm.Swarm, cfg Config) (*Session, error) {
 		peers:    map[*peer]struct{}{},
 		events:   make(chan event),
 		complete: make(chan struct{}),
+		span:     trace.SpanFromContext(context.Background()),
 		sources:  map[int]map[netip.AddrPort]bool{},
 	}
 
@@ -262,6 +270,22 @@ func (s *Session) Stats() Stats {
 // Run downloads and seeds until ctx is cancelled.
 func (s *Session) Run(ctx context.Context) error {
 	s.started = time.Now()
+	ctx, s.span = tracer().Start(ctx, "torrent.session", trace.WithAttributes(
+		attribute.String("torrent.infohash", s.m.InfoHash().Hex()),
+		attribute.String("torrent.name", s.m.Name()),
+		attribute.Int64("torrent.size", int64(s.m.Length())),
+		attribute.Int("torrent.pieces", s.m.NumPieces()),
+		attribute.Int("torrent.pieces.verified_at_start", s.picker.have.Count()),
+	))
+	defer func() {
+		s.span.SetAttributes(
+			attribute.Int64("torrent.downloaded", s.downloaded),
+			attribute.Int64("torrent.uploaded", s.uploaded),
+			attribute.Int64("torrent.hash_failures", s.hashFailures),
+			attribute.Int("torrent.pieces.verified", s.picker.have.Count()),
+		)
+		s.span.End()
+	}()
 	defer s.storage.Close()
 	defer func() {
 		for p := range s.peers {
@@ -399,6 +423,13 @@ func (s *Session) addPeer(ctx context.Context, c *peerwire.Conn, addr netip.Addr
 		peerChoking: true,
 		requests:    map[block]time.Time{},
 	}
+	_, p.span = tracer().Start(ctx, "peer.connection", trace.WithAttributes(
+		attribute.String("peer.addr", addr.String()),
+		attribute.Bool("peer.incoming", incoming),
+		attribute.String("peer.client", p.client),
+		attribute.Bool("peer.extensions", c.Peer.SupportsExtensions()),
+		attribute.Bool("peer.dht", c.Peer.SupportsDHT()),
+	))
 	s.peers[p] = struct{}{}
 	s.log.Debug("peer connected",
 		"addr", addr,
@@ -452,6 +483,14 @@ var errSessionStopped = errors.New("session stopped")
 // logPeerClosed records a peer's whole connection: why it ended, how
 // long it lasted and what was transferred.
 func (s *Session) logPeerClosed(p *peer, reason error) {
+	p.span.SetAttributes(
+		attribute.Int64("peer.downloaded", p.downloaded),
+		attribute.Int64("peer.uploaded", p.uploaded),
+		attribute.Int("peer.pieces", p.have.Count()),
+		attribute.String("peer.close_reason", fmt.Sprint(reason)),
+	)
+	p.span.End()
+
 	s.log.Debug("peer closed",
 		"addr", p.addr,
 		"incoming", p.incoming,
@@ -470,6 +509,7 @@ func (s *Session) handleMessage(p *peer, m peerwire.Message) error {
 	case peerwire.Choke:
 		if !p.peerChoking {
 			s.log.Debug("peer choked us", "addr", p.addr, "client", p.client, "dropped_requests", len(p.requests))
+			p.span.AddEvent("choked us", trace.WithAttributes(attribute.Int("dropped_requests", len(p.requests))))
 		}
 		p.peerChoking = true
 		// A choke discards all our pending requests.
@@ -481,6 +521,7 @@ func (s *Session) handleMessage(p *peer, m peerwire.Message) error {
 	case peerwire.Unchoke:
 		if p.peerChoking {
 			s.log.Debug("peer unchoked us", "addr", p.addr, "client", p.client)
+			p.span.AddEvent("unchoked us")
 		}
 		p.peerChoking = false
 		s.fillRequests(p)
@@ -671,6 +712,7 @@ func (s *Session) finishPiece(i int) {
 			from = append(from, a.String())
 		}
 		s.log.Warn("piece hash failed", "piece", i, "from", from)
+		s.span.AddEvent("piece hash failed", trace.WithAttributes(attribute.Int("piece", i), attribute.StringSlice("from", from)))
 		s.blame(sources)
 	} else if err := s.storage.WriteAt(data, int64(i)*int64(s.m.PieceLength())); err != nil {
 		s.log.Error("storage write failed", "piece", i, "err", err)
@@ -717,8 +759,10 @@ func (s *Session) blame(sources map[netip.AddrPort]bool) {
 		client := ""
 		if p != nil {
 			client = p.client
+			p.span.AddEvent("banned", trace.WithAttributes(attribute.Int("strikes", strikes)))
 			p.conn.Close()
 		}
+		s.span.AddEvent("peer banned", trace.WithAttributes(attribute.String("peer.addr", addr.String())))
 		s.log.Warn("peer banned", "addr", addr, "client", client, "reason", "sent pieces that failed the hash check", "strikes", strikes, "sole_source", len(sources) == 1)
 	}
 }
@@ -731,6 +775,7 @@ func (s *Session) markComplete() {
 			attrs = append(attrs, "dur", dur.Round(time.Millisecond), "avg_rate", int64(float64(s.downloaded)/dur.Seconds()))
 		}
 		s.log.Info("download complete", attrs...)
+		s.span.AddEvent("download complete", trace.WithAttributes(attribute.Int64("torrent.downloaded", s.downloaded)))
 		close(s.complete)
 	})
 }

@@ -10,6 +10,9 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/cnnrznn/torrent-ai/pkg/id"
 	"github.com/cnnrznn/torrent-ai/pkg/metainfo"
 	"github.com/cnnrznn/torrent-ai/pkg/peerwire"
@@ -66,6 +69,10 @@ func FetchMetadata(ctx context.Context, sw *swarm.Swarm, infoHash, peerID id.Has
 		log = slog.New(slog.DiscardHandler)
 	}
 
+	ctx, span := tracer().Start(ctx, "metadata.fetch", trace.WithAttributes(attribute.String("torrent.infohash", infoHash.Hex())))
+	var fetchErr error
+	defer func() { endSpan(span, fetchErr) }()
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -99,20 +106,27 @@ func FetchMetadata(ctx context.Context, sw *swarm.Swarm, infoHash, peerID id.Has
 
 			go func() {
 				defer func() { <-slots }()
+				actx, aspan := tracer().Start(ctx, "metadata.attempt", trace.WithAttributes(attribute.String("peer.addr", addr.String())))
 				attemptStart := time.Now()
-				raw, err := fetchMetadataFrom(ctx, addr, infoHash, peerID, cfg)
+				raw, err := fetchMetadataFrom(actx, addr, infoHash, peerID, cfg)
 				sw.Release(addr, err != nil)
 				if err != nil {
 					if ctx.Err() != nil {
+						aspan.SetAttributes(attribute.String("metadata.result", "cancelled"))
+						aspan.End()
 						return
 					}
 					reason := failureReason(err)
+					aspan.SetAttributes(attribute.String("metadata.result", "failed"), attribute.String("metadata.reason", reason))
+					endSpan(aspan, err)
 					mu.Lock()
 					failures[reason]++
 					mu.Unlock()
 					log.Debug("metadata attempt", "addr", addr, "result", "failed", "reason", reason, "err", err, "dur", time.Since(attemptStart))
 					return
 				}
+				aspan.SetAttributes(attribute.String("metadata.result", "ok"), attribute.Int("metadata.size", len(raw)))
+				aspan.End()
 				log.Debug("metadata attempt", "addr", addr, "result", "ok", "dur", time.Since(attemptStart))
 				select {
 				case results <- success{raw, addr}:
@@ -125,13 +139,21 @@ func FetchMetadata(ctx context.Context, sw *swarm.Swarm, infoHash, peerID id.Has
 		case r := <-results:
 			m, err := metainfo.FromInfoDict(r.raw)
 			if err != nil {
+				fetchErr = err
 				return nil, err
 			}
 			mu.Lock()
+			span.SetAttributes(
+				attribute.String("metadata.from", r.addr.String()),
+				attribute.Int("metadata.size", len(r.raw)),
+				attribute.Int("metadata.attempts", attempts),
+				attribute.String("torrent.name", m.Name()),
+			)
 			log.Info("metadata fetched", "from", r.addr, "size", len(r.raw), "name", m.Name(), "attempts", attempts, "dur", time.Since(start).Round(time.Millisecond))
 			mu.Unlock()
 			return m, nil
 		case <-ctx.Done():
+			fetchErr = ctx.Err()
 			return nil, ctx.Err()
 		case <-sw.Notify():
 		case <-ticker.C:
