@@ -4,10 +4,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// envPrefix starts the environment variable for each flag:
+// -max-peers can be set with TORRENT_AI_MAX_PEERS.
+const envPrefix = "TORRENT_AI_"
 
 // registry wraps a flag.FlagSet with what the help text and startup
 // checks need: groups, spec-defined defaults and minimum values.
@@ -18,6 +23,8 @@ type registry struct {
 	info     map[string]*flagInfo
 	checks   []func() error
 	usageArg string
+	lookup   func(string) (string, bool) // os.LookupEnv, swappable in tests
+	fromEnv  []string                    // flags set from the environment
 }
 
 type flagGroup struct {
@@ -33,7 +40,7 @@ type flagInfo struct {
 
 func newRegistry(name, usageArg string) *registry {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	return &registry{fs: fs, info: map[string]*flagInfo{}, usageArg: usageArg}
+	return &registry{fs: fs, info: map[string]*flagInfo{}, usageArg: usageArg, lookup: os.LookupEnv}
 }
 
 // group starts a new section in the help text.
@@ -98,8 +105,33 @@ func (r *registry) list(p *[]string, name, usage string) {
 	r.add(&listValue{p: p}, name, "list", usage, "")
 }
 
-// parse parses args and runs the minimum-value checks.
+// envName returns the environment variable for a flag.
+func envName(flagName string) string {
+	return envPrefix + strings.ToUpper(strings.ReplaceAll(flagName, "-", "_"))
+}
+
+// parse applies environment variables, then args, which take
+// precedence, and runs the minimum-value checks.
 func (r *registry) parse(args []string) error {
+	r.fromEnv = nil
+	for _, g := range r.groups {
+		for _, name := range g.names {
+			v, ok := r.lookup(envName(name))
+			if !ok {
+				continue
+			}
+			// A switch is turned on by its variable being present,
+			// even if empty.
+			if v == "" && isBoolFlag(r.fs.Lookup(name).Value) {
+				v = "true"
+			}
+			if err := r.fs.Set(name, v); err != nil {
+				return fmt.Errorf("invalid value %q for %s: %w", v, envName(name), err)
+			}
+			r.fromEnv = append(r.fromEnv, name)
+		}
+	}
+
 	if err := r.fs.Parse(args); err != nil {
 		return err
 	}
@@ -109,6 +141,11 @@ func (r *registry) parse(args []string) error {
 		}
 	}
 	return nil
+}
+
+func isBoolFlag(v flag.Value) bool {
+	b, ok := v.(interface{ IsBoolFlag() bool })
+	return ok && b.IsBoolFlag()
 }
 
 // specOverrides returns the spec-defined flags set to something other
@@ -172,6 +209,12 @@ Flags marked [spec-defined recommended default] use the value a BitTorrent
 specification (BEP) defines or recommends. They can be changed for testing,
 but other clients may disconnect or misbehave; the client logs a warning
 when one is overridden.
+
+Every flag can also be set by an environment variable named TORRENT_AI_
+plus the flag name in upper case with - as _, for example
+TORRENT_AI_MAX_PEERS=20 or TORRENT_AI_DHT=false. A switch such as
+TORRENT_AI_FLAME is turned on just by being set, even to an empty value.
+Flags on the command line take precedence.
 
 Sizes accept B, KiB, MiB and GiB (K, M, G and KB, MB, GB mean the same,
 powers of 1024). Durations use Go syntax: 500ms, 30s, 5m, 1h.

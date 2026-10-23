@@ -167,3 +167,54 @@ func TestNextLookup(t *testing.T) {
 	require.Equal(t, 30*time.Second, wait)
 	require.Equal(t, 5*time.Second, retry)
 }
+
+func TestRegistryEnv(t *testing.T) {
+	newEnvRegistry := func(env map[string]string) (*registry, *config) {
+		cfg := defaultConfig()
+		r := newRegistry("torrent", "<target>")
+		registerFlags(r, &cfg)
+		r.fs.SetOutput(io.Discard)
+		r.lookup = func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+		return r, &cfg
+	}
+
+	t.Run("environment variables set flags", func(t *testing.T) {
+		r, cfg := newEnvRegistry(map[string]string{
+			"TORRENT_AI_MAX_PEERS":   "20",
+			"TORRENT_AI_DHT":         "false",
+			"TORRENT_AI_MAX_MEMORY":  "64MiB",
+			"TORRENT_AI_DHT_ROUTERS": "127.0.0.1:7000,127.0.0.1:7001",
+		})
+		require.NoError(t, r.parse(nil))
+		require.Equal(t, 20, cfg.swarm.MaxPeers)
+		require.False(t, cfg.useDHT)
+		require.EqualValues(t, 64<<20, cfg.session.MaxMemory)
+		require.Equal(t, []string{"127.0.0.1:7000", "127.0.0.1:7001"}, cfg.dhtRouters)
+		require.ElementsMatch(t, []string{"max-peers", "dht", "max-memory", "dht-routers"}, r.fromEnv)
+	})
+
+	t.Run("a switch is turned on by being present", func(t *testing.T) {
+		r, cfg := newEnvRegistry(map[string]string{"TORRENT_AI_SEED": ""})
+		require.NoError(t, r.parse(nil))
+		require.True(t, cfg.seed)
+	})
+
+	t.Run("the command line wins", func(t *testing.T) {
+		r, cfg := newEnvRegistry(map[string]string{"TORRENT_AI_MAX_PEERS": "20"})
+		require.NoError(t, r.parse([]string{"-max-peers", "5"}))
+		require.Equal(t, 5, cfg.swarm.MaxPeers)
+	})
+
+	t.Run("bad values name the variable", func(t *testing.T) {
+		r, _ := newEnvRegistry(map[string]string{"TORRENT_AI_BLOCK_SIZE": "lots"})
+		require.ErrorContains(t, r.parse(nil), "TORRENT_AI_BLOCK_SIZE")
+	})
+
+	t.Run("environment values are range-checked", func(t *testing.T) {
+		r, _ := newEnvRegistry(map[string]string{"TORRENT_AI_DHT_K": "0"})
+		require.ErrorContains(t, r.parse(nil), "-dht-k must be at least 1")
+	})
+
+	require.Equal(t, "TORRENT_AI_UDP_CONNECTION_ID_LIFETIME", envName("udp-connection-id-lifetime"))
+	require.Equal(t, "TORRENT_AI_O", envName("o"))
+}

@@ -79,6 +79,9 @@ func main() {
 
 	mainLog.Info("starting", "target", target)
 	mainLog.Info("config", r.values()...)
+	if len(r.fromEnv) > 0 {
+		mainLog.Info("config from environment", "flags", r.fromEnv)
+	}
 	for _, o := range r.specOverrides() {
 		mainLog.Warn("spec default overridden", "flag", o.name, "value", o.value, "default", o.def, "spec", o.spec)
 	}
