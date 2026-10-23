@@ -57,6 +57,9 @@ type Config struct {
 	// Tick is how often the session dials new peers and expires old
 	// requests.
 	Tick time.Duration
+	// MaxMemory caps the bytes held in pieces still being downloaded.
+	// Zero means no limit.
+	MaxMemory int64
 	// Conn tunes peer connections.
 	Conn peerwire.Options
 	// Metadata tunes metadata exchange; PieceSize is used when serving.
@@ -91,10 +94,11 @@ type Stats struct {
 	Downloaded int64
 	Uploaded   int64
 
-	Peers      int // connected peers
-	UnchokedUs int // peers that let us request from them
-	Interested int // peers that have pieces we want
-	Requests   int // block requests in flight
+	Peers      int   // connected peers
+	UnchokedUs int   // peers that let us request from them
+	Interested int   // peers that have pieces we want
+	Requests   int   // block requests in flight
+	Buffered   int64 // bytes held in pieces still being downloaded
 
 	Dials           int64 // outgoing connection attempts
 	DialFailures    int64 // outgoing attempts that failed
@@ -207,6 +211,8 @@ func New(m *metainfo.Metainfo, sw *swarm.Swarm, cfg Config) (*Session, error) {
 		complete: make(chan struct{}),
 		sources:  map[int]map[netip.AddrPort]bool{},
 	}
+
+	s.picker.maxBuffered = cfg.MaxMemory
 
 	if existed {
 		if err := s.verifyExisting(); err != nil {
@@ -815,6 +821,7 @@ func (s *Session) updateStats() {
 		UnchokedUs:      unchoked,
 		Interested:      interested,
 		Requests:        requests,
+		Buffered:        s.picker.buffered,
 		Dials:           s.dials.Load(),
 		DialFailures:    s.dialFailures.Load(),
 		Accepted:        s.accepted.Load(),

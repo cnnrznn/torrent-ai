@@ -274,6 +274,21 @@ func TestSessionConfig(t *testing.T) {
 		require.Equal(t, peerwire.MetadataPieceSize, s.cfg.Metadata.PieceSize)
 	})
 
+	t.Run("downloads within a one-piece memory cap", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		seedDir := t.TempDir()
+		writeContent(t, seedDir, m, data)
+		_, seedAddr := startSession(t, ctx, m, seedDir)
+
+		dir := t.TempDir()
+		leech, _ := startSessionWith(t, ctx, m, Config{Dir: dir, MaxMemory: int64(m.PieceLength())}, seedAddr)
+		waitComplete(t, leech)
+		require.Equal(t, data, readContent(t, dir, m))
+		require.Zero(t, leech.Stats().Buffered)
+	})
+
 	t.Run("downloads with small blocks and one request in flight", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

@@ -141,3 +141,46 @@ func TestPicker(t *testing.T) {
 		require.Equal(t, b, again)
 	})
 }
+
+func TestPickerMemoryCap(t *testing.T) {
+	const pieceLength = 2 * peerwire.BlockSize
+	m, data := makeTorrent(t, pieceLength, 3*pieceLength)
+
+	p := newPicker(m, peerwire.NewBitfield(3), peerwire.BlockSize)
+	p.maxBuffered = pieceLength
+
+	// Peer A has only piece 0, peer B only piece 1.
+	a, b := peerwire.NewBitfield(3), peerwire.NewBitfield(3)
+	a.Set(0)
+	b.Set(1)
+
+	blk, ok := p.next(a, never)
+	require.True(t, ok)
+	require.EqualValues(t, pieceLength, p.buffered)
+
+	_, ok = p.next(b, never)
+	require.False(t, ok, "a second piece would exceed the cap")
+
+	// Finishing piece 0 frees its memory.
+	p.requested(blk)
+	p.received(blk, data[blk.begin:blk.begin+blk.length])
+	blk2, _ := p.next(a, never)
+	p.requested(blk2)
+	_, complete := p.received(blk2, data[blk2.begin:blk2.begin+blk2.length])
+	require.True(t, complete)
+	p.finish(0, true)
+	require.Zero(t, p.buffered)
+
+	_, ok = p.next(b, never)
+	require.True(t, ok)
+}
+
+func TestPickerMemoryCapSmallerThanAPiece(t *testing.T) {
+	const pieceLength = 2 * peerwire.BlockSize
+	m, _ := makeTorrent(t, pieceLength, 2*pieceLength)
+	p := newPicker(m, peerwire.NewBitfield(2), peerwire.BlockSize)
+	p.maxBuffered = 1
+
+	_, ok := p.next(full(2), never)
+	require.True(t, ok, "one piece may always be in progress")
+}

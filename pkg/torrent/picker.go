@@ -29,9 +29,15 @@ type partialPiece struct {
 type picker struct {
 	m         *metainfo.Metainfo
 	blockSize int
-	have      peerwire.Bitfield
-	avail     []int
-	partial   map[int]*partialPiece
+
+	// maxBuffered caps the bytes held in partial pieces; 0 means no
+	// limit. One piece may always be in progress, so a cap smaller than
+	// a piece slows the download instead of stalling it.
+	maxBuffered int64
+	buffered    int64
+	have        peerwire.Bitfield
+	avail       []int
+	partial     map[int]*partialPiece
 }
 
 func newPicker(m *metainfo.Metainfo, have peerwire.Bitfield, blockSize int) *picker {
@@ -114,8 +120,13 @@ func (p *picker) next(bf peerwire.Bitfield, sentByPeer func(block) bool) (block,
 			}
 		}
 	}
+	if best != -1 && p.maxBuffered > 0 && len(p.partial) > 0 &&
+		p.buffered+int64(p.m.PieceSize(best)) > p.maxBuffered {
+		best = -1
+	}
 	if best != -1 {
 		nb := p.numBlocks(best)
+		p.buffered += int64(p.m.PieceSize(best))
 		p.partial[best] = &partialPiece{
 			data:      make([]byte, p.m.PieceSize(best)),
 			reqs:      make([]int, nb),
@@ -191,6 +202,9 @@ func (p *picker) finish(i int, ok bool) {
 	pp := p.partial[i]
 	delete(p.partial, i)
 	if ok {
+		if pp != nil {
+			p.buffered -= int64(len(pp.data))
+		}
 		p.have.Set(i)
 		return
 	}
