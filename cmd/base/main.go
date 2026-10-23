@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -24,11 +25,23 @@ import (
 const dhtInterval = 5 * time.Minute
 
 type config struct {
-	dir  string
-	port int
-	seed bool
-	dht  bool
+	dir     string
+	port    int
+	seed    bool
+	dht     bool
+	timeout time.Duration
 }
+
+// Exit codes.
+const (
+	exitComplete    = 0
+	exitError       = 1
+	exitUsage       = 2
+	exitTimeout     = 3
+	exitInterrupted = 130
+)
+
+var errTimeout = errors.New("timeout")
 
 func main() {
 	var cfg config
@@ -36,35 +49,75 @@ func main() {
 	flag.IntVar(&cfg.port, "port", 6881, "TCP port for peers, and UDP port for the DHT")
 	flag.BoolVar(&cfg.seed, "seed", false, "keep seeding after the download completes")
 	flag.BoolVar(&cfg.dht, "dht", true, "find peers through the DHT")
-	verbose := flag.Bool("v", false, "verbose logging")
+	flag.DurationVar(&cfg.timeout, "timeout", 0, "give up after this long, exiting with code 3 (0 = no limit)")
+	verbose := flag.Bool("v", false, "debug logging for every component (same as -debug=all)")
+	debug := flag.String("debug", "", "comma-separated components to debug-log: all,"+strings.Join(components, ","))
+	logFormat := flag.String("log-format", "text", "log format: text or json")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: %s [flags] <file.torrent | magnet:?...>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "exit codes: 0 complete, 1 error, 2 usage, 3 timeout, 130 interrupted\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 	if flag.NArg() != 1 {
 		flag.Usage()
-		os.Exit(2)
+		os.Exit(exitUsage)
 	}
 
-	level := slog.LevelInfo
+	debugComponents := strings.Split(*debug, ",")
 	if *verbose {
-		level = slog.LevelDebug
+		debugComponents = append(debugComponents, "all")
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	log, err := newLogger(os.Stderr, *logFormat, debugComponents)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(exitUsage)
+	}
+	mainLog := log.With("component", compMain)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	if cfg.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, cfg.timeout, errTimeout)
+		defer cancel()
+	}
 
-	if err := run(ctx, log, flag.Arg(0), cfg); err != nil && ctx.Err() == nil {
-		log.Error(err.Error())
-		os.Exit(1)
+	mainLog.Info("starting",
+		"target", flag.Arg(0),
+		"dir", cfg.dir,
+		"port", cfg.port,
+		"dht", cfg.dht,
+		"seed", cfg.seed,
+		"timeout", cfg.timeout,
+	)
+
+	start := time.Now()
+	err = run(ctx, log, flag.Arg(0), cfg)
+	elapsed := time.Since(start).Round(time.Millisecond)
+
+	switch {
+	case err == nil:
+		mainLog.Info("exit", "result", "complete", "elapsed", elapsed, "code", exitComplete)
+		os.Exit(exitComplete)
+	case errors.Is(context.Cause(ctx), errTimeout):
+		mainLog.Error("exit", "result", "timeout", "elapsed", elapsed, "code", exitTimeout)
+		os.Exit(exitTimeout)
+	case ctx.Err() != nil:
+		mainLog.Info("exit", "result", "interrupted", "elapsed", elapsed, "code", exitInterrupted)
+		os.Exit(exitInterrupted)
+	default:
+		mainLog.Error("exit", "result", "error", "err", err, "elapsed", elapsed, "code", exitError)
+		os.Exit(exitError)
 	}
 }
 
 func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	mainLog := log.With("component", compMain)
+	trackerLog := log.With("component", compTracker)
 
 	peerID := id.NewPeerID()
 	sw := swarm.New(50)
@@ -89,18 +142,18 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 
 	var node *dht.Server
 	if cfg.dht {
-		node, err = dht.New(dht.Config{Addr: fmt.Sprintf(":%d", cfg.port), Logger: log})
+		node, err = dht.New(dht.Config{Addr: fmt.Sprintf(":%d", cfg.port), Logger: log.With("component", compDHT)})
 		if err != nil {
 			return err
 		}
 		go node.Run(ctx)
-		go dhtPeers(ctx, log, node, sw, infoHash, cfg.port)
+		go dhtPeers(ctx, log.With("component", compDHT), node, sw, infoHash, cfg.port)
 	}
 
 	if mag != nil {
-		log.Info("fetching metadata", "name", mag.Name, "infohash", infoHash.Hex(), "trackers", len(mag.Trackers))
+		mainLog.Info("fetching metadata", "name", mag.Name, "infohash", infoHash.Hex(), "trackers", len(mag.Trackers))
 		for _, tr := range mag.Trackers {
-			go announce(ctx, log, sw, tr, tracker.Request{
+			go announce(ctx, trackerLog, sw, tr, tracker.Request{
 				InfoHash: infoHash,
 				PeerID:   peerID,
 				Port:     cfg.port,
@@ -110,11 +163,11 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 				Event: tracker.EventStarted,
 			})
 		}
-		if m, err = torrent.FetchMetadata(ctx, sw, infoHash, peerID, log); err != nil {
+		if m, err = torrent.FetchMetadata(ctx, sw, infoHash, peerID, log.With("component", compMetadata)); err != nil {
 			return err
 		}
 	}
-	log.Info("loaded torrent", "name", m.Name(), "size", m.Length(), "pieces", m.NumPieces(), "infohash", infoHash.Hex())
+	mainLog.Info("loaded torrent", "name", m.Name(), "size", m.Length(), "pieces", m.NumPieces(), "infohash", infoHash.Hex())
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.port))
 	if err != nil {
@@ -125,7 +178,7 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 		Dir:      cfg.dir,
 		PeerID:   peerID,
 		Listener: ln,
-		Logger:   log,
+		Logger:   log.With("component", compSession),
 	}
 	if node != nil {
 		sessCfg.DHTPort = cfg.port
@@ -138,7 +191,7 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 	}
 
 	if m.Announce() != "" {
-		go announce(ctx, log, sw, m.Announce(), tracker.Request{
+		go announce(ctx, trackerLog, sw, m.Announce(), tracker.Request{
 			InfoHash: infoHash,
 			PeerID:   peerID,
 			Port:     cfg.port,
@@ -165,10 +218,10 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 				<-errc
 				return nil
 			}
-			log.Info("seeding; press ctrl-c to stop")
+			mainLog.Info("seeding; press ctrl-c to stop")
 		case <-ticker.C:
 			st := s.Stats()
-			log.Info("progress",
+			mainLog.Info("progress",
 				"pieces", fmt.Sprintf("%d/%d", st.Have, st.Pieces),
 				"percent", fmt.Sprintf("%.1f", 100*float64(st.Have)/float64(st.Pieces)),
 				"peers", st.Peers,
