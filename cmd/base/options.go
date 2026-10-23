@@ -42,6 +42,8 @@ type config struct {
 	dhtRetryInterval time.Duration
 	dhtStatsInterval time.Duration
 
+	profiling profiling
+
 	swarm    swarm.Config
 	session  torrent.Config
 	metadata torrent.MetadataConfig
@@ -94,6 +96,14 @@ func registerFlags(r *registry, cfg *config) {
 	r.str(&cfg.logFormat, "log-format", "log format: text or json")
 	r.str(&cfg.debug, "debug", "comma-separated components to debug-log: all,"+strings.Join(components, ","))
 	r.boolean(&cfg.verbose, "v", "debug-log every component (same as -debug=all)")
+
+	r.group("Profiling (flame graphs)")
+	r.add(&switchAddr{p: &cfg.profiling.addr, def: defaultFlameAddr}, "flame", "[=addr]",
+		"serve Go pprof profiles over HTTP at /debug/pprof for flame graphs; -flame alone uses "+defaultFlameAddr+", -flame=:6060 listens on every interface", "")
+	r.str(&cfg.profiling.cpuFile, "flame-cpu-file", "write a CPU profile of the whole run to this file at exit (Go allows one CPU profile at a time, so this disables -flame's /debug/pprof/profile)")
+	r.str(&cfg.profiling.heapFile, "flame-heap-file", "write a heap profile to this file at exit")
+	r.integer(&cfg.profiling.blockRate, "flame-block-rate", 0, "record blocking events lasting this many nanoseconds or more (runtime.SetBlockProfileRate); 0 is off, 1 records all", "")
+	r.integer(&cfg.profiling.mutexFraction, "flame-mutex-fraction", 0, "sample 1 in this many mutex contention events (runtime.SetMutexProfileFraction); 0 is off", "")
 
 	r.group("Peers")
 	r.list(&cfg.peers, "peer", "peer address (host:port) to connect to directly; repeatable or comma-separated")
@@ -166,6 +176,11 @@ func (cfg *config) validate() error {
 	for _, u := range cfg.trackers {
 		if _, err := tracker.New(u); err != nil {
 			return fmt.Errorf("-tracker %q: %w", tracker.Redact(u), err)
+		}
+	}
+	if a := cfg.profiling.addr; a != "" {
+		if _, _, err := net.SplitHostPort(a); err != nil {
+			return fmt.Errorf("-flame %q: %w", a, err)
 		}
 	}
 	if cfg.logFormat != "text" && cfg.logFormat != "json" {

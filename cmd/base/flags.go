@@ -188,7 +188,9 @@ func (r *registry) printUsage(w io.Writer) {
 			info := r.info[name]
 
 			head := "  -" + name
-			if info.kind != "" {
+			if strings.HasPrefix(info.kind, "[") {
+				head += info.kind
+			} else if info.kind != "" {
 				head += " " + info.kind
 			}
 			fmt.Fprintln(w, head)

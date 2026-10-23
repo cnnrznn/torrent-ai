@@ -2,7 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime/pprof"
 	"testing"
 	"time"
 
@@ -217,4 +224,83 @@ func TestRegistryEnv(t *testing.T) {
 
 	require.Equal(t, "TORRENT_AI_UDP_CONNECTION_ID_LIFETIME", envName("udp-connection-id-lifetime"))
 	require.Equal(t, "TORRENT_AI_O", envName("o"))
+}
+
+func TestFlameSwitch(t *testing.T) {
+	parse := func(env map[string]string, args ...string) (config, error) {
+		cfg := defaultConfig()
+		r := newRegistry("torrent", "<target>")
+		registerFlags(r, &cfg)
+		r.fs.SetOutput(io.Discard)
+		r.lookup = func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+		if err := r.parse(args); err != nil {
+			return cfg, err
+		}
+		return cfg, cfg.validate()
+	}
+
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		args []string
+		want string
+	}{
+		{"off by default", nil, nil, ""},
+		{"present but empty", map[string]string{"TORRENT_AI_FLAME": ""}, nil, defaultFlameAddr},
+		{"set to 1", map[string]string{"TORRENT_AI_FLAME": "1"}, nil, defaultFlameAddr},
+		{"set to an address", map[string]string{"TORRENT_AI_FLAME": ":7070"}, nil, ":7070"},
+		{"turned off", map[string]string{"TORRENT_AI_FLAME": "false"}, nil, ""},
+		{"bare flag", nil, []string{"-flame"}, defaultFlameAddr},
+		{"flag with address", nil, []string{"-flame=127.0.0.1:7071"}, "127.0.0.1:7071"},
+		{"flag overrides env", map[string]string{"TORRENT_AI_FLAME": ""}, []string{"-flame=false"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := parse(tc.env, tc.args...)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, cfg.profiling.addr)
+		})
+	}
+
+	_, err := parse(map[string]string{"TORRENT_AI_FLAME": "not an address"})
+	require.ErrorContains(t, err, "-flame")
+}
+
+func TestFlameEndpoint(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cpu := filepath.Join(t.TempDir(), "cpu.pprof")
+	heap := filepath.Join(t.TempDir(), "heap.pprof")
+	p := profiling{addr: "127.0.0.1:0", cpuFile: cpu, heapFile: heap}
+
+	// Listen on a known free port so the test can reach it.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	p.addr = ln.Addr().String()
+	ln.Close()
+
+	stop, err := p.start(ctx, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+
+	res, err := http.Get("http://" + p.addr + "/debug/pprof/goroutine?debug=1")
+	require.NoError(t, err)
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	require.Contains(t, string(body), "goroutine profile")
+
+	stop()
+	for _, f := range []string{cpu, heap} {
+		st, err := os.Stat(f)
+		require.NoError(t, err)
+		require.Positive(t, st.Size(), f)
+	}
+}
+
+func TestLabeled(t *testing.T) {
+	labeled(context.Background(), "dht", func(ctx context.Context) {
+		v, ok := pprof.Label(ctx, "component")
+		require.True(t, ok)
+		require.Equal(t, "dht", v)
+	})
 }

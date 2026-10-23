@@ -86,9 +86,17 @@ func main() {
 		mainLog.Warn("spec default overridden", "flag", o.name, "value", o.value, "default", o.def, "spec", o.spec)
 	}
 
+	stopProfiling, err := cfg.profiling.start(ctx, mainLog)
+	if err != nil {
+		stopProfiling()
+		mainLog.Error("exit", "result", "error", "err", err, "elapsed", time.Duration(0), "code", exitError)
+		os.Exit(exitError)
+	}
+
 	start := time.Now()
 	err = run(ctx, log, target, cfg)
 	elapsed := time.Since(start).Round(time.Millisecond)
+	stopProfiling()
 
 	switch {
 	case err == nil:
@@ -179,15 +187,15 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 		if err != nil {
 			return fmt.Errorf("dht: %w", err)
 		}
-		go node.Run(ctx)
-		go dhtPeers(ctx, dhtCfg.Logger, node, sw, infoHash, port, cfg)
+		go labeled(ctx, compDHT, func(ctx context.Context) { node.Run(ctx) })
+		go labeled(ctx, compDHT, func(ctx context.Context) { dhtPeers(ctx, dhtCfg.Logger, node, sw, infoHash, port, cfg) })
 	}
 	mainLog.Info("listening", "port", port, "dht", node != nil)
 
 	if mag != nil {
 		mainLog.Info("fetching metadata", "name", mag.Name, "infohash", infoHash.Hex(), "trackers", len(trackers), "direct_peers", len(direct))
 		for _, tr := range trackers {
-			go announce(ctx, trackerLog, sw, tr, trackerOpts, tracker.Request{
+			req := tracker.Request{
 				InfoHash: infoHash,
 				PeerID:   peerID,
 				Port:     port,
@@ -196,11 +204,15 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 				Left:    1,
 				Event:   tracker.EventStarted,
 				NumWant: cfg.numWant,
-			})
+			}
+			go labeled(ctx, compTracker, func(ctx context.Context) { announce(ctx, trackerLog, sw, tr, trackerOpts, req) })
 		}
 		metaCfg := cfg.metadata
 		metaCfg.Logger = log.With("component", compMetadata)
-		if m, err = torrent.FetchMetadata(ctx, sw, infoHash, peerID, metaCfg); err != nil {
+		labeled(ctx, compMetadata, func(ctx context.Context) {
+			m, err = torrent.FetchMetadata(ctx, sw, infoHash, peerID, metaCfg)
+		})
+		if err != nil {
 			return err
 		}
 	}
@@ -221,19 +233,20 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 
 	if mag == nil {
 		for _, tr := range trackers {
-			go announce(ctx, trackerLog, sw, tr, trackerOpts, tracker.Request{
+			req := tracker.Request{
 				InfoHash: infoHash,
 				PeerID:   peerID,
 				Port:     port,
 				Left:     int(s.Stats().Left),
 				Event:    tracker.EventStarted,
 				NumWant:  cfg.numWant,
-			})
+			}
+			go labeled(ctx, compTracker, func(ctx context.Context) { announce(ctx, trackerLog, sw, tr, trackerOpts, req) })
 		}
 	}
 
 	errc := make(chan error, 1)
-	go func() { errc <- s.Run(ctx) }()
+	go labeled(ctx, compSession, func(ctx context.Context) { errc <- s.Run(ctx) })
 
 	ticker := time.NewTicker(cfg.statusInterval)
 	defer ticker.Stop()
