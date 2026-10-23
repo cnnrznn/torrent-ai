@@ -45,6 +45,7 @@ type config struct {
 
 	profiling profiling
 	otel      otelConfig
+	daemon    daemonConfig
 
 	swarm    swarm.Config
 	session  torrent.Config
@@ -71,6 +72,7 @@ func defaultConfig() config {
 		dhtRetryInterval: 5 * time.Second,
 		dhtStatsInterval: time.Minute,
 
+		daemon:   daemonConfig{stateDir: defaultStateDir()},
 		swarm:    swarm.DefaultConfig(),
 		session:  torrent.DefaultConfig(),
 		metadata: torrent.DefaultMetadataConfig(),

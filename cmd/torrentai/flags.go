@@ -23,6 +23,7 @@ type registry struct {
 	info     map[string]*flagInfo
 	checks   []func() error
 	usageArg string
+	notes    string                      // printed under the usage line
 	lookup   func(string) (string, bool) // os.LookupEnv, swappable in tests
 	fromEnv  []string                    // flags set from the environment
 }
@@ -191,6 +192,9 @@ func (r *registry) values() []any {
 // printUsage writes the grouped help text.
 func (r *registry) printUsage(w io.Writer) {
 	fmt.Fprintf(w, "usage: %s [flags] %s\n", r.fs.Name(), r.usageArg)
+	if r.notes != "" {
+		fmt.Fprint(w, r.notes)
+	}
 
 	for _, g := range r.groups {
 		fmt.Fprintf(w, "\n%s:\n", g.title)

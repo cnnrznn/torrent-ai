@@ -40,29 +40,81 @@ const (
 var errTimeout = errors.New("timeout")
 
 func main() {
+	args := os.Args[1:]
+	if len(args) > 0 {
+		switch args[0] {
+		case "serve":
+			os.Exit(runCommand(serveCommand, args[1:]))
+		case "add", "ls", "status", "rm":
+			os.Exit(clientMain(args[0], args[1:]))
+		}
+	}
+	os.Exit(runCommand(downloadCommand, args))
+}
+
+// command is one way of running torrentai with the full runtime:
+// flags and environment, logging, telemetry, profiling and signals.
+type command struct {
+	name     string // shown in usage, after the program name
+	usage    string // positional arguments
+	args     int    // number of positional arguments required
+	register func(*registry, *config)
+	// rootSpan names a span covering the whole run; empty for none.
+	rootSpan string
+	run      func(ctx context.Context, log *slog.Logger, cfg config, args []string) error
+}
+
+// downloadCommand is the one-shot download: torrentai <magnet|file>.
+var downloadCommand = command{
+	usage:    "<file.torrent | magnet:?...>",
+	args:     1,
+	rootSpan: "torrentai.run",
+	run: func(ctx context.Context, log *slog.Logger, cfg config, args []string) error {
+		trace.SpanFromContext(ctx).SetAttributes(attribute.String("torrent.target", redactTarget(args[0])))
+		return run(ctx, log, args[0], cfg)
+	},
+}
+
+// runCommand runs cmd and returns the process exit code.
+func runCommand(cmd command, args []string) int {
 	cfg := defaultConfig()
-	r := newRegistry(filepath.Base(os.Args[0]), "<file.torrent | magnet:?...>")
+	name := filepath.Base(os.Args[0])
+	if cmd.name != "" {
+		name += " " + cmd.name
+	}
+	r := newRegistry(name, cmd.usage)
+	if cmd.name == "" {
+		r.notes = fmt.Sprintf(`
+Downloads one torrent and exits. To run many, use the daemon:
+  %[1]s serve [flags]                     run the daemon
+  %[1]s add [flags] <magnet|file>         add a torrent to it
+  %[1]s ls | status <infohash> | rm <infohash>
+Each takes -h.
+`, filepath.Base(os.Args[0]))
+	}
 	registerFlags(r, &cfg)
+	if cmd.register != nil {
+		cmd.register(r, &cfg)
+	}
 	r.fs.SetOutput(os.Stderr)
 	r.fs.Usage = func() { r.printUsage(os.Stderr) }
 
-	if err := r.parse(os.Args[1:]); err != nil {
+	if err := r.parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			os.Exit(exitComplete)
+			return exitComplete
 		}
 		fmt.Fprintf(os.Stderr, "%v\nrun with -h for help\n", err)
-		os.Exit(exitUsage)
+		return exitUsage
 	}
-	if r.fs.NArg() != 1 {
+	if r.fs.NArg() != cmd.args {
 		r.printUsage(os.Stderr)
-		os.Exit(exitUsage)
+		return exitUsage
 	}
 	if err := cfg.validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\nrun with -h for help\n", err)
-		os.Exit(exitUsage)
+		return exitUsage
 	}
 	cfg.finish()
-	target := r.fs.Arg(0)
 
 	ctx, stop := withStopSignals(context.Background())
 	defer stop()
@@ -70,7 +122,7 @@ func main() {
 	tel, err := setupTelemetry(ctx, cfg.otel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "opentelemetry: %v\n", err)
-		os.Exit(exitError)
+		return exitError
 	}
 
 	debugComponents := strings.Split(cfg.debug, ",")
@@ -80,7 +132,7 @@ func main() {
 	log, err := newLogger(os.Stderr, cfg.logFormat, debugComponents, tel.logHandler)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(exitUsage)
+		return exitUsage
 	}
 	mainLog := log.With("component", compMain)
 	context.AfterFunc(ctx, func() {
@@ -95,7 +147,14 @@ func main() {
 		defer cancel()
 	}
 
-	mainLog.Info("starting", "target", target, "version", version())
+	startAttrs := []any{"version", version()}
+	if cmd.name != "" {
+		startAttrs = append(startAttrs, "command", cmd.name)
+	}
+	if cmd.args > 0 {
+		startAttrs = append(startAttrs, "target", r.fs.Arg(0))
+	}
+	mainLog.Info("starting", startAttrs...)
 	mainLog.Info("config", r.values()...)
 	if len(r.fromEnv) > 0 {
 		mainLog.Info("config from environment", "flags", r.fromEnv)
@@ -108,7 +167,7 @@ func main() {
 	if err != nil {
 		stopProfiling()
 		mainLog.Error("exit", "result", "error", "err", err, "elapsed", time.Duration(0), "code", exitError)
-		os.Exit(exitError)
+		return exitError
 	}
 
 	if cfg.otel.enabled {
@@ -122,10 +181,13 @@ func main() {
 		)
 	}
 
-	runCtx, span := otel.Tracer(instrumentationName).Start(ctx, "torrentai.run",
-		trace.WithAttributes(attribute.String("torrent.target", redactTarget(target))))
+	runCtx := ctx
+	span := trace.SpanFromContext(ctx)
+	if cmd.rootSpan != "" {
+		runCtx, span = otel.Tracer(instrumentationName).Start(ctx, cmd.rootSpan)
+	}
 	start := time.Now()
-	err = run(runCtx, log, target, cfg)
+	err = cmd.run(runCtx, log, cfg, r.fs.Args())
 	elapsed := time.Since(start).Round(time.Millisecond)
 	if err != nil && ctx.Err() == nil {
 		span.RecordError(err)
@@ -143,7 +205,7 @@ func main() {
 		mainLog.Warn("opentelemetry shutdown failed", "err", err)
 	}
 	cancelShutdown()
-	os.Exit(code)
+	return code
 }
 
 // logExit writes the final exit line and returns the exit code.
