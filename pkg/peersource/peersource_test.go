@@ -138,3 +138,25 @@ func TestTrackerLoop(t *testing.T) {
 	}
 	require.Equal(t, "stopped", last.event, "says goodbye on the way out")
 }
+
+func TestKeepBootstrapped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	start := func() *dht.Server {
+		s, err := dht.New(dht.Config{Addr: "127.0.0.1:0", QueryTimeout: 200 * time.Millisecond})
+		require.NoError(t, err)
+		go s.Run(ctx)
+		return s
+	}
+	router, node := start(), start()
+
+	// No torrents at all: the node still joins.
+	go KeepBootstrapped(ctx, discard, node, DHTConfig{
+		Routers:       []string{router.Addr().String()},
+		MinNodes:      1,
+		Interval:      time.Minute,
+		RetryInterval: 50 * time.Millisecond,
+	})
+	require.Eventually(t, func() bool { return node.Nodes() >= 1 }, 5*time.Second, 10*time.Millisecond)
+}

@@ -43,6 +43,7 @@ type config struct {
 	dhtInterval      time.Duration
 	dhtRetryInterval time.Duration
 	dhtStatsInterval time.Duration
+	dhtSaveInterval  time.Duration
 
 	profiling profiling
 	otel      otelConfig
@@ -73,6 +74,7 @@ func defaultConfig() config {
 		dhtInterval:      5 * time.Minute,
 		dhtRetryInterval: 5 * time.Second,
 		dhtStatsInterval: time.Minute,
+		dhtSaveInterval:  5 * time.Minute,
 
 		daemon:   daemonConfig{stateDir: defaultStateDir()},
 		swarm:    swarm.DefaultConfig(),
@@ -171,6 +173,7 @@ func registerFlags(r *registry, cfg *config) {
 	r.duration(&cfg.dhtInterval, "dht-interval", time.Millisecond, "how often the DHT lookup and announce for the torrent repeats", "")
 	r.duration(&cfg.dhtRetryInterval, "dht-retry-interval", time.Millisecond, "first retry after a weak bootstrap or a lookup that found no peers; doubles up to -dht-interval", "")
 	r.duration(&cfg.dhtStatsInterval, "dht-stats-interval", time.Millisecond, "how often \"dht stats\" is logged", "")
+	r.duration(&cfg.dhtSaveInterval, "dht-save-interval", time.Millisecond, "serve: how often the routing table is saved to the state dir (also saved at shutdown)", "")
 	r.duration(&cfg.dht.QueryTimeout, "dht-query-timeout", time.Millisecond, "how long a DHT query may go unanswered", "")
 	r.integer(&cfg.dht.K, "dht-k", 1, "bucket size, and nodes a lookup converges on and replies carry", "BEP 5, 8")
 	r.integer(&cfg.dht.MaxFailures, "dht-max-failures", 1, "unanswered queries in a row before a node is considered bad", "")

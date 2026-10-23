@@ -196,3 +196,40 @@ func TrackerLoop(ctx context.Context, log *slog.Logger, sw *swarm.Swarm, url str
 		}
 	}
 }
+
+// KeepBootstrapped keeps node's routing table at MinNodes or more until
+// ctx is cancelled: it bootstraps at once, retries a weak table after
+// RetryInterval (doubling up to Interval), and checks again every
+// Interval. A long-running process uses it so the DHT is joined before,
+// and regardless of, any torrent.
+func KeepBootstrapped(ctx context.Context, log *slog.Logger, node *dht.Server, cfg DHTConfig) {
+	retry := cfg.RetryInterval
+	for {
+		wait := cfg.Interval
+		if node.Nodes() < cfg.MinNodes {
+			st, err := node.Bootstrap(ctx, cfg.Routers)
+			if ctx.Err() != nil {
+				return
+			}
+			switch {
+			case err != nil:
+				log.Warn("dht bootstrap failed", "err", err, "nodes", node.Nodes(), "lookup", st, "next", retry)
+			case node.Nodes() < cfg.MinNodes:
+				log.Warn("dht bootstrap weak", "nodes", node.Nodes(), "want", cfg.MinNodes, "lookup", st, "next", retry)
+			default:
+				log.Info("dht bootstrapped", "nodes", node.Nodes(), "lookup", st)
+			}
+			if node.Nodes() < cfg.MinNodes {
+				wait, retry = retry, min(2*retry, cfg.Interval)
+			} else {
+				retry = cfg.RetryInterval
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+	}
+}

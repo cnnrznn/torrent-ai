@@ -91,15 +91,12 @@ func serve(ctx context.Context, log *slog.Logger, cfg config) error {
 
 	var node *dht.Server
 	if cfg.useDHT {
-		dhtCfg := cfg.dht
-		dhtCfg.Addr = fmt.Sprintf(":%d", port)
-		dhtCfg.Logger = log.With("component", compDHT)
-		if node, err = dht.New(dhtCfg); err != nil {
+		if node, err = startDaemonDHT(ctx, log.With("component", compDHT), cfg, store, port); err != nil {
 			ln.Close()
-			return fmt.Errorf("dht: %w", err)
+			return err
 		}
-		go labeled(ctx, compDHT, func(ctx context.Context) { node.Run(ctx) })
-		go labeled(ctx, compDHT, func(ctx context.Context) { logDHTStatsEvery(ctx, dhtCfg.Logger, node, cfg.dhtStatsInterval) })
+		// Save the routing table once the torrents have stopped.
+		defer saveDHT(log.With("component", compDHT), store, node)
 	}
 
 	m := daemon.New(daemon.Config{
@@ -154,6 +151,66 @@ func serve(ctx context.Context, log *slog.Logger, cfg config) error {
 	go logDaemonStatusEvery(ctx, mainLog, m, node, cfg.statusInterval)
 
 	return m.Run(ctx)
+}
+
+// startDaemonDHT starts the DHT node, keeping the node ID and routing
+// table saved by the last run so it needn't bootstrap from scratch, and
+// saves them periodically.
+func startDaemonDHT(ctx context.Context, log *slog.Logger, cfg config, store *daemon.Store, port int) (*dht.Server, error) {
+	dhtCfg := cfg.dht
+	dhtCfg.Addr = fmt.Sprintf(":%d", port)
+	dhtCfg.Logger = log
+
+	saved, ok, err := store.LoadDHT()
+	if err != nil {
+		log.Warn("saved dht state unreadable, starting fresh", "err", err)
+	}
+	if ok {
+		if h, err := id.FromHex(saved.ID); err == nil {
+			dhtCfg.ID = h
+		}
+	}
+
+	node, err := dht.New(dhtCfg)
+	if err != nil {
+		return nil, fmt.Errorf("dht: %w", err)
+	}
+	if ok {
+		added := node.Seed(saved.Nodes)
+		log.Info("dht routing table restored", "nodes", added, "saved", len(saved.Nodes), "age", time.Since(saved.SavedAt).Round(time.Second))
+	}
+
+	go labeled(ctx, compDHT, func(ctx context.Context) { node.Run(ctx) })
+	go labeled(ctx, compDHT, func(ctx context.Context) { logDHTStatsEvery(ctx, log, node, cfg.dhtStatsInterval) })
+	// Join the DHT now, not when the first torrent is added: readiness
+	// depends on it.
+	go labeled(ctx, compDHT, func(ctx context.Context) { peersource.KeepBootstrapped(ctx, log, node, cfg.peerSourceDHT()) })
+	go labeled(ctx, compDHT, func(ctx context.Context) {
+		ticker := time.NewTicker(cfg.dhtSaveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				saveDHT(log, store, node)
+			}
+		}
+	})
+	return node, nil
+}
+
+func saveDHT(log *slog.Logger, store *daemon.Store, node *dht.Server) {
+	nodes := node.GoodNodes()
+	if len(nodes) == 0 {
+		return // keep the last good save rather than an empty one
+	}
+	st := daemon.DHTState{ID: node.ID().Hex(), Nodes: nodes, SavedAt: time.Now().UTC()}
+	if err := store.SaveDHT(st); err != nil {
+		log.Warn("saving dht state failed", "err", err)
+		return
+	}
+	log.Debug("dht state saved", "nodes", len(nodes))
 }
 
 // serveAPI starts the API on the unix socket and, if set, the TCP
