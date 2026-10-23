@@ -236,7 +236,7 @@ func (s *Server) maintain(ctx context.Context) {
 
 func (s *Server) send(b []byte, to netip.AddrPort) {
 	if _, err := s.conn.WriteToUDPAddrPort(b, to); err != nil {
-		s.log.Debug("send failed", "to", to, "err", err)
+		s.log.Debug("dht send failed", "to", to, "err", err)
 	}
 }
 

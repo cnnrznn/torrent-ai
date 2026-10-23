@@ -221,7 +221,7 @@ func run(ctx context.Context, log *slog.Logger, arg string, cfg config) error {
 				return nil
 			}
 			phase = "seeding"
-			mainLog.Info("seeding; press ctrl-c to stop")
+			mainLog.Info("seeding", "hint", "interrupt to stop")
 		case <-ticker.C:
 			st := s.Stats()
 			logStatus(mainLog, phase, st, last, sw, node)

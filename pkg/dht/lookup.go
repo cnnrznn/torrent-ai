@@ -191,7 +191,6 @@ func (s *Server) lookup(ctx context.Context, target id.Hash, getPeers bool, foun
 		}
 	}
 	st.Duration = time.Since(start)
-	s.log.Debug("dht lookup done", "target", target.Hex(), "get_peers", getPeers, "stats", st)
 	return result, st, nil
 }
 

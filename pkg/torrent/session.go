@@ -300,7 +300,7 @@ func (s *Session) acceptLoop(ctx context.Context, ln net.Listener) {
 		nc, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() == nil {
-				s.log.Warn("accept failed", "err", err)
+				s.log.Warn("listener accept failed", "err", err)
 			}
 			return
 		}
@@ -564,7 +564,7 @@ func (s *Session) serveRequest(p *peer, index, begin, length int) error {
 	data := make([]byte, length)
 	off := int64(index)*int64(s.m.PieceLength()) + int64(begin)
 	if err := s.storage.ReadAt(data, off); err != nil {
-		s.log.Error("read failed", "piece", index, "err", err)
+		s.log.Error("storage read failed", "piece", index, "err", err)
 		return nil
 	}
 	p.conn.Send(peerwire.MsgPiece(index, begin, data))
@@ -620,7 +620,7 @@ func (s *Session) finishPiece(i int) {
 		s.log.Warn("piece hash failed", "piece", i, "from", from)
 		s.blame(sources)
 	} else if err := s.storage.WriteAt(data, int64(i)*int64(s.m.PieceLength())); err != nil {
-		s.log.Error("write failed", "piece", i, "err", err)
+		s.log.Error("storage write failed", "piece", i, "err", err)
 		ok = false
 	}
 	s.picker.finish(i, ok)
